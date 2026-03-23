@@ -1,0 +1,17 @@
+# Environment and caches
+.venv/
+__pycache__/
+.env
+
+# macOS metadata
+**/.DS_Store
+
+# Claude Code project-level memory (user-specific, lives outside project dir)
+.claude/projects/
+
+# Personal / generated data (recipient runs orchestrator and adds their own)
+data/*.pdf
+data/sovereign_agent.db
+data/candidate_info.json
+data/history/
+data/run_diagnostics.jsonl

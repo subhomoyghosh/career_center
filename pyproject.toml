@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "job_finder"
+version = "0.1.0"
+description = "Identity-driven job search and match tracking"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "streamlit",
+    "pandas",
+    "plotly",
+    "google-genai",
+    "pypdf",
+    "requests",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

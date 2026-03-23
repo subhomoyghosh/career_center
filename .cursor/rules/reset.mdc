@@ -1,0 +1,14 @@
+---
+description: Reset project to clean state (empty config, jobs, snapshot history); use when starting over
+globs: data/candidate_info.json, data/sovereign_agent.db, data/history/
+---
+# /reset
+
+When the user asks to **reset** or **start over** or **clear everything**:
+
+1. From the project root, run in the **terminal** (not chat):
+   - `python3 reset.py` or `uv run python reset.py`
+2. This removes **`data/candidate_info.json`** if present, writes a fresh empty template to **`data/candidate_info.json`**, deletes **`data/sovereign_agent.db`**, and clears **`data/history/*.db`** (candidate / jobs / intelligence snapshots). Resume PDF(s) in `data/` are **not** deleted.
+3. Tell the user to run **`python3 orchestrator.py`** (or `uv run python orchestrator.py`) next to recreate the database, then run **/setup** again to re-infer their profile from the resume (or drop a new resume and run /setup), then **/fetchjobs** when ready.
+
+Do not run /fetchjobs as part of reset; the user runs it after re-running /setup.
