@@ -15,3 +15,4 @@ data/sovereign_agent.db
 data/candidate_info.json
 data/history/
 data/run_diagnostics.jsonl
+data/improve_log.jsonl
