@@ -94,6 +94,7 @@ Then continue with the normal sequence below.
      "valid_jobs": <int>,
      "board_page_hits": <int>,
      "zero_result_queries": <int>,
+     "zero_result_query_strings": ["<query>", ...],
      "lever_css_fallback_count": <int>,
      "workday_hits": <int>,
      "linkedin_discovered": <int>,

@@ -71,7 +71,7 @@ If **zero diagnostic runs** exist: print `NO_DIAGNOSTICS_YET` and stop.
 | `SCORING_TOO_STRICT` | `pct_high_score < 0.10` AND `avg_valid_jobs > 5` | MEDIUM |
 | `LINKEDIN_ATS_WEAK` | `linkedin_ats_ratio < 0.40` | LOW |
 | `DOMAIN_BLIND_SPOT` | domain in `priority_domains` with `domain_coverage_gaps` | HIGH |
-| `CANDIDATE_PROFILE_DRIFT` | ≥ 3 bad-feedback jobs share a title pattern not in `noise_keywords` | MEDIUM |
+| `CANDIDATE_PROFILE_DRIFT` | `bad_feedback_title_tokens` (from nudge context) has ≥ 1 token with frequency ≥ 3 not already in `noise_keywords` | MEDIUM |
 | `WISDOM_STALE` | wisdom in `candidate_info.json` unchanged across 3+ run dates | LOW |
 | `SKILL_STALE_REFERENCE` | skill file references removed field, dead path, or hardcoded year | MEDIUM |
 | `SKILL_TOKEN_BLOAT` | any skill/command file > 10000 chars, OR a cross-tool pair flagged above | MEDIUM |
@@ -112,7 +112,7 @@ Approve? [yes / no / modify: …]
 
 | ID | Target | Action |
 |----|--------|--------|
-| `SEARCH_TOO_NARROW` | `fetchjobs.md` §Query building | Add 2-keyword fallback query strategy |
+| `SEARCH_TOO_NARROW` | `fetchjobs.md` §Query building | Add 2-keyword fallback query strategy; cite `zero_result_query_strings` from diagnostics to name the specific failing queries |
 | `LINK_VALIDATION_AGGRESSIVE` | `validate-job-links/SKILL.md` | Narrow dead-phrase list |
 | `BOARD_PAGE_LEAKAGE` | `fetchjobs.md` §board-index detection | Expand URL signal list |
 | `LEVER_CSS_FALLBACK_HIGH` | `fetchjobs.md` §Lever/Ashby | Add aggregator fallback targets |
