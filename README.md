@@ -52,9 +52,15 @@ Place the resume PDF in the `data/` folder. Use any filename that **contains "re
 
 **In Cursor:** Type **`/fetchjobs`**.
 
-**In Claude Code:** Type **`/fetchjobs`** in the chat (load active profile, search, score, **validate links**, persist jobs, update `wisdom`).
+**In Claude Code:** Type **`/fetchjobs`** in the chat.
 
-`/fetchjobs` now includes a dedicated LinkedIn path and logs:
+`/fetchjobs` runs as an **orchestrator + agent teams** for speed:
+
+- **Context Team** — profile, nudge context, and resume PDF loaded as 3 parallel tool calls.
+- **Discovery Team** — all WebSearch and WebFetch calls fire in parallel waves (Search Wave → Fetch Wave → Backfill Wave). WebSearch/WebFetch cannot be delegated to subagents and always run in the main turn.
+- **Persistence Agent** (background subagent) — after scoring, validates links, persists jobs, and emits diagnostics while the main orchestrator writes wisdom in parallel.
+
+`/fetchjobs` includes a dedicated LinkedIn path and logs:
 - `linkedin_discovered`
 - `linkedin_with_ats`
 - `linkedin_fallback_only`
@@ -99,7 +105,7 @@ Market Intelligence is rendered as a one-column bullet table (`Intelligence`), w
 | `scripts/evaluate_nudge_system.py` | Prints external-LMM judge prompts (optional). | **User runs optionally**. |
 | `.cursor/skills/evaluate-nudge-and-wisdom/` | Agent judge for nudge + wisdom (optional QA). | **Auto inside the agent** when the user requests it (not manual). |
 | `.cursor/skills/validate-job-links/` | Extra MCP web validation (used when the agent audits listings). | **Auto inside the agent** when needed (not manual). |
-| `.cursor/rules/jobsearch.mdc` | `/fetchjobs` agent rule. | **User triggers** by typing `/fetchjobs` (agent runs internals automatically). |
+| `.claude/commands/fetchjobs.md` / `.cursor/rules/jobsearch.mdc` | `/fetchjobs` agent rule — orchestrator + Context Team + Discovery Team + Persistence Agent. | **User triggers** by typing `/fetchjobs` (agent runs internals automatically). |
 | `.cursor/rules/setup_from_resume.mdc` | `/setup` agent rule. | **User triggers** by typing `/setup` (agent proposes JSON). |
 | `app.py` | Streamlit UI: edit profile + set job feedback/weights. | **User runs** `streamlit run app.py`; updates happen when the user clicks buttons. |
 
@@ -120,7 +126,10 @@ sequenceDiagram
     participant D as data/
     participant A as User (AI Chat)
     participant S as /setup
-    participant F as /fetchjobs
+    participant F as Orchestrator (/fetchjobs)
+    participant CT as Context Team
+    participant DT as Discovery Team
+    participant PA as Persistence Agent
     participant App as streamlit app.py
 
     U->>O: run orchestrator
@@ -133,10 +142,39 @@ sequenceDiagram
     A->>D: save active profile JSON
 
     A->>F: /fetchjobs
-    F->>D: load active profile
-    F->>F: search jobs, score, filter_valid_job_links
-    F->>D: persist jobs → sovereign_agent.db, history snapshot
-    F->>D: update wisdom → profile + intelligence snapshot
+
+    note over F,CT: Step 1 — parallel tool calls (one message)
+    par Context Team
+        F->>CT: Read profile JSON
+        F->>CT: Bash nudge context script
+        F->>CT: Read resume PDF
+    end
+    CT-->>F: profile + nudge + achievements
+
+    note over F,DT: Step 2 — Discovery (3 waves, each wave = one parallel message)
+    F->>DT: Wave 1 — all WebSearch queries (8-10 parallel calls)
+    DT-->>F: raw search results
+    F->>DT: Wave 2 — all WebFetch calls (6-8 parallel calls)
+    DT-->>F: job descriptions
+    F->>DT: Wave 3 — backfill WebSearch + WebFetch (parallel)
+    DT-->>F: backfill results
+
+    note over F: Step 3 — Score candidates (main context)
+    F->>F: apply moat scoring + noise filter
+
+    note over F,PA: Steps 4+6 and 5 run in parallel
+    par Persistence Agent (background)
+        F->>PA: scored job list
+        PA->>PA: filter_valid_job_links
+        PA->>D: persist_jobs → sovereign_agent.db, history snapshot
+        PA->>D: append run_diagnostics.jsonl
+        PA-->>F: valid_jobs_count, content_failed
+    and Wisdom Loop (main orchestrator)
+        F->>F: synthesize wisdom from scored batch
+        F->>D: update wisdom → profile + intelligence snapshot
+    end
+
+    F->>A: print final summary
 
     U->>App: streamlit run app.py
     App->>D: load config + jobs

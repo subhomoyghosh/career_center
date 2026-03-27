@@ -27,15 +27,42 @@ Then continue with the normal sequence below.
 
 ---
 
+## Agent Teams (multi-agent execution model)
+
+`/fetchjobs` runs as an **orchestrator + two specialist agents**. Architecture and logic are unchanged — only execution is parallelized.
+
+| Team | Runs as | Responsibility |
+|------|---------|----------------|
+| **Context Team** | Parallel tool calls (main turn, Step 1) | Profile load + resume PDF + nudge context, all in one message |
+| **Discovery Team** | Parallel tool calls (main turn, Steps 2–3) | All WebSearch waves + WebFetch waves in parallel batches; scoring in main context. **Cannot be delegated to a subagent.** |
+| **Persistence Agent** | Background subagent (after Step 3) | `filter_valid_job_links` + `persist_jobs` + diagnostics emit. Spawned after scoring so main agent can write wisdom in parallel. |
+
+**Orchestration order:**
+
+1. Fire **Context Team** (3 parallel tool calls) → wait for results.
+2. Run **Discovery Team** in 3 sequential waves of parallel calls (Search Wave → Fetch Wave → Backfill Wave) → score candidates.
+3. Spawn **Persistence Agent** in background with the scored job list.
+4. While Persistence Agent runs: main agent writes wisdom.
+5. Receive Persistence Agent output (valid_jobs count, content_failed) → incorporate into wisdom if needed → print final summary.
+
+---
+
 ## Sequence:
 
-1. **Context Ingestion:**
+1. **Context Ingestion** *(Context Team — fire all three as parallel tool calls in one message)*:
    - Load the active profile JSON (`candidate_info.json`) and use **all** of: `core_identity`, `scientific_moat`, `engineering_stack`, `target_seniority`, `target_country`, `golden_keywords`, `noise_keywords`, `priority_domains`, `search_targets`, `wisdom`. Optionally `priority_industries` (alias for priority_domains), `peer_companies`.
    - **User feedback & weights (nudge):** Run `uv run python scripts/get_nudge_context.py` and use its JSON output (or call `get_high_signal_jobs()` from `job_finder.persistence`). Use the listed jobs as **positive signals**: bias search queries and scoring toward similar roles (company, title, theme, rationale); mention these patterns in the wisdom synthesis. Apply stronger nudge for higher `user_weight` (e.g. 100 = very strong signal).
    - Parse the resume PDF: list `data/` (e.g. `ls data/`) and pick any `.pdf` whose filename contains "resume" (case-insensitive). Use that file to extract Top 3 Achievements and enrich rationale (no hard-coded company names). (PDFs may be gitignored — do not rely on glob alone.)
    - **`peer_companies` organic search:** If `peer_companies` is non-empty, run additional discovery queries such as `"[peer] competitor" "Applied Scientist" site:lever.co` or `"people also hired from [peer]" "Data Scientist"` to find adjacent companies hiring from similar talent pools. If `peer_companies` is empty, suggest the user populate it with 2–3 prior employers or known peer companies so future runs can exploit this signal.
 
-2. **Vectorized Search (Active Roles Only) — use every field:**
+2. **Vectorized Search (Active Roles Only) — use every field** *(Discovery Team — fire in 3 waves, each wave is one parallel message)*:
+
+   **Wave 1 — Search Wave:** Fire all primary `WebSearch` queries simultaneously in a single message (target 8–10 calls). Build queries per the rules below, then dispatch all at once.
+
+   **Wave 2 — Fetch Wave:** After Wave 1 returns, fire all `WebFetch` calls for promising candidates simultaneously in a single message (target 6–8 calls). Includes aggregator fallback fetches for JS-rendered ATS pages.
+
+   **Wave 3 — Backfill Wave:** After Wave 2 returns, fire any remaining secondary `WebSearch` queries (ATS backfill for LinkedIn, aggregator searches for 403 Lever/Ashby pages) + any follow-up `WebFetch` calls simultaneously in a single message.
+
    - **Site targets:** If `search_targets` is present, run **one or more queries per target** using `site:[domain]`. Always include both `jobs.lever.co` and `lever.co`, and both `job-boards.greenhouse.io` and `boards.greenhouse.io` if either appears in `search_targets`.
    - **Workday path (dedicated):** If `search_targets` includes `workday.com` or `myworkdayjobs.com`, run queries against **`site:myworkdayjobs.com`** (not `site:workday.com` — the latter rarely surfaces individual listings). Example: `site:myworkdayjobs.com "Applied Scientist" ("Bayesian" OR "Causal Inference") USA`. Also try `"[company] careers" "Applied Scientist" workday` for companies known to use Workday.
    - **LinkedIn (dedicated path):** If `search_targets` includes **`linkedin.com/jobs`**, run `site:linkedin.com/jobs` searches. **However:** LinkedIn via `site:` often returns stale aggregation pages rather than individual listings. Treat LinkedIn as a **discovery hint layer only** — extract company+title from any hits, then immediately run a secondary ATS backfill search (e.g. `"[company]" "[title]" site:lever.co OR site:greenhouse.io OR site:ashbyhq.com`) to find the direct ATS URL. Persist the ATS link, not the LinkedIn link, whenever possible.
@@ -63,26 +90,35 @@ Then continue with the normal sequence below.
    - **Scoring confidence:** If job description text was unavailable (Lever/Ashby CSS fallback) and no aggregator text was found, cap score at 79 and note `description_not_fetched: true` in rationale.
    - **Requirement:** The `RATIONALE` must explain **how the candidate's `scientific_moat` solves a specific problem mentioned in the job description.**
 
-4. **Persistence:**
-   - **Do not call terminal scripts for persistence.** Discovery/scoring must happen inside the agent (Claude Code + MCP tools). Persistence happens by calling Python functions in-context (no `python3 scripts/run_fetchjobs.py` fallback).
-   - **Link validation (primary quality gate):** Before writing to the DB, run **`filter_valid_job_links`** (from `job_finder.link_validation`) with `require_title_in_body=False`. Drops: bad/missing URLs, non-2xx, short/empty bodies, dead-job phrases, and board-index pages.
+4. **Persistence** *(Persistence Agent — spawn as background subagent after Step 3 scoring)*:
+
+   After scoring is complete, hand the scored job list to a **background Persistence Agent** (uses only Python/Bash — no WebSearch/WebFetch). The main orchestrator proceeds immediately to Step 5 (Wisdom Loop) in parallel.
+
+   The Persistence Agent must:
+   - **Do not call terminal scripts for persistence.** Persistence happens by calling Python functions in-context (no `python3 scripts/run_fetchjobs.py` fallback).
+   - **Link validation (primary quality gate):** Run **`filter_valid_job_links`** (from `job_finder.link_validation`) with `require_title_in_body=False`. Drops: bad/missing URLs, non-2xx, short/empty bodies, dead-job phrases, and board-index pages.
      - **Known false-positive pattern:** Some ATS pages (e.g. Greenhouse-hosted boards, fintech career sites) embed CDN asset paths that may contain substrings matching dead-page phrases. If `content_failed > 0`, manually HTTP-check each failing URL (using `requests.get`) and print `status_code` + first 200 chars of body. Re-admit any URL that returns 200 with non-trivial job content (confirmed live). Log each manual rescue with reason.
      - Immediately before calling `filter_valid_job_links`, print `discovered_jobs_count` and a small sample of `{company,title,link}`.
      - After validation, print `valid_jobs_count` and a small sample of `{company,title,link}` from `valid_jobs`.
      - Always call `persist_jobs(valid_jobs)` even if `valid_jobs` is empty.
    - **Schema contract (important):** Each job dict passed to `persist_jobs` must include *non-empty* keys exactly named `company`, `title`, `link`, `score`, `theme`, `rationale`. If any required key is missing, `persist_jobs` will silently skip that row.
    - **Snapshots:** `persist_jobs` appends a full jobs-table snapshot to `data/history/jobs_history.db` (append-only).
+   - Also run Step 6 (Diagnostics Emit) — see below.
+   - Return `valid_jobs_count` and `content_failed` to the orchestrator.
 
-5. **Wisdom Loop:**
-   - Analyze the **entire validated batch** (not just top 1-2 jobs): synthesize cumulative patterns across domain mix, role seniority, methods demanded, tooling patterns, and hiring signals.
+   The orchestrator waits for the Persistence Agent to complete before printing the final summary. If the Persistence Agent's `valid_jobs_count` differs from what was assumed for wisdom, append a one-sentence correction to wisdom.
+
+5. **Wisdom Loop** *(main orchestrator — runs in parallel with Persistence Agent)*:
+   - Analyze the **entire scored batch** (not just top 1-2 jobs): synthesize cumulative patterns across domain mix, role seniority, methods demanded, tooling patterns, and hiring signals.
    - Generate wisdom as **3-6 short, clear sentences** when you have validated jobs evidence.
    - If `valid_jobs` is empty, generate **1-2 sentences** that (a) explicitly say the evidence was empty and (b) state the most likely gating cause and what to change next time.
    - Ensure each sentence is grounded in current run evidence. If evidence is weak, say so explicitly.
    - The wisdom string must be written by the agent during `/fetchjobs` — not delegated to user edits.
    - Update the **active profile JSON** (`candidate_info.json`): set **`wisdom`** only. **Preserve every other key** when writing.
 
-6. **Diagnostics Emit (required — feeds `/improve`):**
-   After the wisdom loop completes, append a single JSON object (one line) to `data/run_diagnostics.jsonl`. Create the file if it does not exist. Never overwrite — always append. Include:
+6. **Diagnostics Emit (required — feeds `/improve`)** *(runs inside Persistence Agent, after `persist_jobs`)*:
+
+   Append a single JSON object (one line) to `data/run_diagnostics.jsonl`. Create the file if it does not exist. Never overwrite — always append. Include:
    ```json
    {
      "run_date": "<ISO timestamp>",
