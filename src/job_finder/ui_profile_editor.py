@@ -28,6 +28,7 @@ def render_profile_sidebar(profile: dict, config: dict) -> tuple[bool, bool]:
             value=profile.get("core_identity", ""),
             height=100,
             help="High-level professional narrative.",
+            key="core_identity_pitch",
         )
         new_moat = st.text_input(
             "Scientific moat (comma-sep)",

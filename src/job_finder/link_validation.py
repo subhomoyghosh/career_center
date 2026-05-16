@@ -4,6 +4,7 @@ Second pass before persist_jobs; input is not mutated.
 """
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor
 from urllib.parse import urlparse
 from typing import Any, List
 
@@ -142,17 +143,42 @@ def _looks_like_board_without_job(title: str, body_lower: str) -> bool:
     return False
 
 
+def _final_url_indicates_dead(response, original_url: str = "") -> bool:
+    """
+    Detect dead-job redirects that return 200 but land on an error/board page.
+
+    Greenhouse: dead `/jobs/{id}` URLs redirect to `/{org}?error=true`.
+    Generic ATS pattern: original path contained `/jobs/{id}` but final URL no longer does.
+    """
+    final_url = getattr(response, "url", "") or ""
+    if not final_url:
+        return False
+    final_low = final_url.lower()
+    if "error=true" in final_low or "error_code=" in final_low:
+        return True
+    if original_url:
+        m = re.search(r"/jobs/([0-9a-f-]{4,})", original_url, flags=re.I)
+        if m:
+            job_id = m.group(1).lower()
+            if job_id not in final_low:
+                return True
+    return False
+
+
 def _body_parseable_and_not_dead(
     response,
     job_title: str = "",
     *,
     min_body_chars: int = MIN_BODY_CHARS,
     is_linkedin: bool = False,
+    original_url: str = "",
 ) -> bool:
     try:
         response.raise_for_status()
         text = response.text
     except (requests.RequestException, ValueError):
+        return False
+    if _final_url_indicates_dead(response, original_url=original_url):
         return False
     if not text or len(text.strip()) < min_body_chars:
         return False
@@ -187,11 +213,15 @@ def filter_valid_job_links(
     require_title_in_body: bool = True,
     fallback_to_link_only_on_network_failure: bool = True,
     fallback_to_link_only_on_content_failure: bool = True,
+    max_workers: int = 10,
 ) -> List[dict]:
     """
     Keep jobs whose link returns 2xx, body is substantial, not a dead-page message,
     and (unless LinkedIn) the HTML should echo enough of the job title to avoid generic board pages.
     Set require_title_in_body=False to only check HTTP + dead phrases + min length.
+
+    Fetches run in parallel (max_workers threads) — wall time is dominated by the
+    slowest single request rather than sum of all timeouts.
 
     If the runtime cannot fetch pages (e.g. network is blocked), this function can
     otherwise drop everything. When enabled, we detect the "all fetches failed
@@ -206,36 +236,58 @@ def filter_valid_job_links(
     if not jobs:
         return []
 
-    valid = []
+    print(
+        "filter_valid_job_links debug: "
+        + f"received={len(jobs)} require_title_in_body={require_title_in_body} check_content={check_content}"
+    )
+
+    # Phase 1: syntactic validation — instant, no network.
+    candidates: List[tuple] = []
+    invalid_link_count = 0
+    for job in jobs:
+        link_norm = _normalize_link(job.get("link"))
+        if not _link_valid(link_norm):
+            invalid_link_count += 1
+        else:
+            candidates.append((job, link_norm))
+
     counters = {
-        "checked": 0,
-        "invalid_link": 0,
+        "checked": len(candidates),
+        "invalid_link": invalid_link_count,
         "fetch_none": 0,
         "http_non_2xx": 0,
         "content_failed": 0,
         "returned": 0,
     }
-    # Debug: show how many jobs the agent handed to the quality gate.
-    print(
-        "filter_valid_job_links debug: "
-        + f"received={len(jobs)} require_title_in_body={require_title_in_body} check_content={check_content}"
-    )
+
+    if not candidates:
+        counters["returned"] = 0
+        counters["fallback_to_link_only"] = False
+        counters["fallback_reason"] = "none"
+        print("filter_valid_job_links debug summary: " + ", ".join(f"{k}={v}" for k, v in counters.items()))
+        return []
+
+    # Phase 2: parallel HTTP fetches — one thread per candidate, bounded by max_workers.
+    # requests.Session is thread-safe for concurrent reads; connection pool is shared.
     session = requests.Session()
     session.max_redirects = 5
 
-    for job in jobs:
-        link = job.get("link")
-        link_norm = _normalize_link(link)
-        if not _link_valid(link_norm):
-            counters["invalid_link"] += 1
-            continue
-        counters["checked"] += 1
-        title = str(job.get("title") or "")
-        link_s = str(link_norm).lower()
-        # LinkedIn / some boards often omit full title in bot-visible HTML — relax echo check.
-        relax_title = "linkedin.com" in link_s or not require_title_in_body
+    def _fetch(args):
+        job, link_norm = args
+        return job, link_norm, _fetch_response(link_norm, timeout_sec, session)
+
+    fetch_results: List[tuple] = []
+    with ThreadPoolExecutor(max_workers=min(max_workers, len(candidates))) as pool:
+        fetch_results = list(pool.map(_fetch, candidates))
+
+    # Phase 3: content checks — CPU-bound string ops, serial, fast.
+    valid = []
+    for job, link_norm, r in fetch_results:
+        link_s = link_norm.lower()
         is_linkedin = "linkedin.com" in link_s
-        r = _fetch_response(link_norm, timeout_sec, session)
+        relax_title = is_linkedin or not require_title_in_body
+        title = str(job.get("title") or "")
+
         if r is None:
             counters["fetch_none"] += 1
             continue
@@ -244,9 +296,6 @@ def filter_valid_job_links(
             continue
         if check_content:
             tcheck = "" if relax_title else title
-            # When the caller relaxes title echo checks, some ATS pages still
-            # return shorter bot-visible HTML. Lower min-body threshold to
-            # avoid dropping all valid listings.
             min_body = (
                 MIN_BODY_CHARS_LINKEDIN
                 if is_linkedin
@@ -257,10 +306,10 @@ def filter_valid_job_links(
                 tcheck,
                 min_body_chars=min_body,
                 is_linkedin=is_linkedin,
+                original_url=link_norm,
             ):
                 counters["content_failed"] += 1
                 continue
-        # Avoid mutating caller state; return a shallow copy with normalized link.
         job2 = dict(job)
         job2["link"] = link_norm
         valid.append(job2)
@@ -268,9 +317,7 @@ def filter_valid_job_links(
     counters["returned"] = len(valid)
     dropped = len(jobs) - len(valid)
 
-    # If every HTTP fetch failed with "no response" (not even a status code),
-    # it is usually an environment/network constraint. In that case, return
-    # syntactically valid links so /fetchjobs can keep moving.
+    # Fallback: all fetches got no response → network constraint, use link-only.
     if (
         fallback_to_link_only_on_network_failure
         and not valid
@@ -279,14 +326,7 @@ def filter_valid_job_links(
         and counters["http_non_2xx"] == 0
         and counters["content_failed"] == 0
     ):
-        valid = []
-        for job in jobs:
-            link_norm = _normalize_link(job.get("link"))
-            if not _link_valid(link_norm):
-                continue
-            job2 = dict(job)
-            job2["link"] = link_norm
-            valid.append(job2)
+        valid = [dict(job) | {"link": link_norm} for job, link_norm in candidates]
         counters["returned"] = len(valid)
         counters["fallback_to_link_only"] = True
         counters["fallback_reason"] = "network_fetch_none_all"
@@ -294,6 +334,7 @@ def filter_valid_job_links(
             "filter_valid_job_links debug fallback: "
             + f"all fetches failed; returning link-only jobs returned={len(valid)}"
         )
+    # Fallback: all fetches returned 2xx but content checks failed → bot interstitials.
     elif (
         fallback_to_link_only_on_content_failure
         and not valid
@@ -303,15 +344,7 @@ def filter_valid_job_links(
         and counters["content_failed"] == counters["checked"]
         and not require_title_in_body
     ):
-        # Content heuristic failed for every candidate (usually short/bot interstitial).
-        valid = []
-        for job in jobs:
-            link_norm = _normalize_link(job.get("link"))
-            if not _link_valid(link_norm):
-                continue
-            job2 = dict(job)
-            job2["link"] = link_norm
-            valid.append(job2)
+        valid = [dict(job) | {"link": link_norm} for job, link_norm in candidates]
         counters["returned"] = len(valid)
         counters["fallback_to_link_only"] = True
         counters["fallback_reason"] = "content_failed_all"

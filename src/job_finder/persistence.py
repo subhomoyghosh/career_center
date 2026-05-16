@@ -1,10 +1,15 @@
 """
 Save and read jobs in the database.
-Each job: id, company, title, link, score, theme, rationale, status, user_feedback, user_weight.
+Each job: id, company, title, link, score, theme, rationale, status, user_feedback, user_weight, first_seen, posted_at.
 The id is a hash of the link so we don't add the same job twice.
+
+first_seen: ISO 8601 UTC timestamp of when WE first persisted this row. Always populated.
+posted_at: ISO 8601 UTC timestamp of when the employer posted the job (best-effort,
+           extracted by the agent from sources like Lever's createdAt). May be NULL.
 """
 import hashlib
 import sqlite3
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlparse
 
@@ -21,9 +26,49 @@ CREATE TABLE IF NOT EXISTS jobs (
     rationale TEXT,
     status TEXT DEFAULT 'New',
     user_feedback TEXT,
-    user_weight INTEGER DEFAULT 50
+    user_weight INTEGER DEFAULT 50,
+    first_seen TEXT,
+    posted_at TEXT
 )
 """
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _normalize_posted_at(value: Any) -> Optional[str]:
+    """
+    Best-effort normalize a posted-at value into an ISO 8601 UTC string.
+
+    Accepts:
+    - None / "" → None
+    - Epoch ms (Lever's createdAt) or seconds, as int/float or all-digit string
+    - ISO-like string → passed through trimmed (we don't validate, just store)
+    """
+    if value is None or value == "":
+        return None
+    try:
+        if isinstance(value, bool):
+            return None
+        if isinstance(value, (int, float)):
+            ts = float(value)
+        elif isinstance(value, str):
+            s = value.strip()
+            if not s:
+                return None
+            if s.lstrip("-").isdigit():
+                ts = float(s)
+            else:
+                return s
+        else:
+            return None
+        # Heuristic: > 1e12 implies milliseconds (year 2001+).
+        if ts > 1e12:
+            ts = ts / 1000.0
+        return datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
+    except (ValueError, OSError, OverflowError):
+        return None
 
 _PLACEHOLDER_HOSTS = {
     "example.com",
@@ -102,6 +147,11 @@ def _adapt_job_fields(j: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         ),
     )
 
+    posted_at_raw = _coalesce_first(
+        j,
+        ("posted_at", "createdAt", "created_at", "posted_date", "date_posted", "postedAt"),
+    )
+
     payload = {
         "company": company,
         "title": title,
@@ -109,9 +159,11 @@ def _adapt_job_fields(j: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         "score": score,
         "theme": theme,
         "rationale": rationale,
+        "posted_at": _normalize_posted_at(posted_at_raw),
     }
 
     # Ensure all required fields are present and non-empty.
+    # posted_at is optional and intentionally excluded from this check.
     if any(payload.get(k) in (None, "") for k in ("company", "title", "link", "score", "theme", "rationale")):
         return None
 
@@ -125,6 +177,17 @@ def ensure_feedback_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE jobs ADD COLUMN user_feedback TEXT")
     if "user_weight" not in cols:
         conn.execute("ALTER TABLE jobs ADD COLUMN user_weight INTEGER DEFAULT 50")
+    conn.commit()
+
+
+def ensure_recency_columns(conn: sqlite3.Connection) -> None:
+    """Add first_seen and posted_at columns to existing databases (idempotent)."""
+    cur = conn.execute("PRAGMA table_info(jobs)")
+    cols = [row[1] for row in cur.fetchall()]
+    if "first_seen" not in cols:
+        conn.execute("ALTER TABLE jobs ADD COLUMN first_seen TEXT")
+    if "posted_at" not in cols:
+        conn.execute("ALTER TABLE jobs ADD COLUMN posted_at TEXT")
     conn.commit()
 
 
@@ -172,6 +235,7 @@ def create_jobs_table(db_path: Optional[str] = None) -> None:
     conn.execute(JOBS_SCHEMA)
     ensure_feedback_columns(conn)
     migrate_jobs_table_drop_legacy_posting_columns(conn)
+    ensure_recency_columns(conn)
     conn.close()
 
 
@@ -184,6 +248,7 @@ def persist_jobs(jobs: List[dict], db_path: Optional[str] = None) -> None:
     conn = sqlite3.connect(path)
     ensure_feedback_columns(conn)
     migrate_jobs_table_drop_legacy_posting_columns(conn)
+    ensure_recency_columns(conn)
     counters = {
         "received": len(jobs),
         "persisted": 0,
@@ -281,17 +346,22 @@ def persist_jobs(jobs: List[dict], db_path: Optional[str] = None) -> None:
             continue
 
         job_id = _job_id(payload["link"])
+        new_posted_at = adapted.get("posted_at")
         row = conn.execute(
-            "SELECT user_feedback, user_weight, status FROM jobs WHERE id = ?",
+            "SELECT user_feedback, user_weight, status, first_seen, posted_at FROM jobs WHERE id = ?",
             (job_id,),
         ).fetchone()
         if row is not None:
-            feedback, weight, status = row[0], row[1], row[2]
+            feedback, weight, status, existing_first_seen, existing_posted_at = row
             payload = {
                 **payload,
                 "user_feedback": feedback,
                 "user_weight": weight if weight is not None else 50,
                 "status": status or "New",
+                "first_seen": existing_first_seen or _now_iso(),
+                # Prefer the freshly extracted value; fall back to existing.
+                # This lets a later Lever-API hit upgrade a row first persisted via aggregator.
+                "posted_at": new_posted_at if new_posted_at else existing_posted_at,
             }
         else:
             payload = {
@@ -299,11 +369,14 @@ def persist_jobs(jobs: List[dict], db_path: Optional[str] = None) -> None:
                 "user_feedback": j.get("user_feedback"),
                 "user_weight": j.get("user_weight", 50),
                 "status": "New",
+                "first_seen": _now_iso(),
+                "posted_at": new_posted_at,
             }
         conn.execute(
             """INSERT OR REPLACE INTO jobs (
-                id, company, title, link, score, theme, rationale, status, user_feedback, user_weight)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                id, company, title, link, score, theme, rationale, status, user_feedback, user_weight,
+                first_seen, posted_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 job_id,
                 payload["company"],
@@ -315,6 +388,8 @@ def persist_jobs(jobs: List[dict], db_path: Optional[str] = None) -> None:
                 payload.get("status", "New"),
                 payload.get("user_feedback"),
                 payload.get("user_weight", 50),
+                payload["first_seen"],
+                payload.get("posted_at"),
             ),
         )
         counters["persisted"] += 1

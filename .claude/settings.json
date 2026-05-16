@@ -2,11 +2,7 @@
   "permissions": {
     "allow": [
       "Bash(*)",
-      "WebFetch(domain:simplify.jobs)",
-      "WebFetch(domain:jobs.ashbyhq.com)",
-      "WebFetch(domain:job-boards.greenhouse.io)",
-      "WebFetch(domain:builtin.com)",
-      "WebFetch(domain:ibotta.wd1.myworkdayjobs.com)",
+      "WebFetch",
       "WebSearch"
     ]
   }
