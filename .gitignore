@@ -20,6 +20,7 @@ data/improve_proposals.jsonl
 data/improve_changes.jsonl
 data/skill_section_usage.jsonl
 data/pruned_history.jsonl
+data/sweep_history.jsonl
 data/last_session.json
 
 # Scratch files used by /fetchjobs-pro for description externalization
