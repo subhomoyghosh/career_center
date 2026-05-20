@@ -25,8 +25,10 @@ Streamlit UI. Steps 1–2 are one-time. Steps 5–8 form the steady-state loop.
      `Applied`/`InProgress`/`Closed`/`Won` stay POSITIVE-GENRE (the next search
      keeps nudging toward similar roles even after the specific row is closed).
 7. Rerun **`/fetchjobs`** — new feedback/status biases the next search.
-8. **`/improve`** — two modes:
-   - **Auto-audit (recommended):** turn on the sidebar toggle "Auto-improve audit after each /fetchjobs". Every `/fetchjobs` then auto-runs `/improve --audit-only` and stages proposals to `data/improve_proposals.jsonl`. Review and approve them in **Streamlit → Analytics → Pending Improvements**. Per-change revert lives in the **Improvement History** table below.
+8. **`/improve`** — four modes:
+   - **`--auto` (recommended for pro users):** set `auto_improve_enabled: true` in `data/candidate_info.json`. Every `/fetchjobs` then auto-runs `/improve --auto`, which (a) self-heals by reverting any prior applied change whose next-run metrics regressed (`valid_jobs < 0.85×`, `pct_high_score < 0.85×`, or `tokens_per_valid_job > 1.5×` vs. the change's recorded `pre_metrics`), (b) auto-applies Tier 1–4 compaction (hedge cleanup, example externalization, cold-section archive to `.claude/_archive/`, cross-file dedup), (c) stages PATTERN_*/SCORING_DRIFT_ to Streamlit for human review (those change behavior, not just cost), and (d) prints a brief `AUTO_SUMMARY` (reverted N, applied N, bytes reclaimed, total_skill_bytes trend, watching next-run change_ids). Pain-point thresholds activate from `n_priors_used ≥ 1` with graduated severity. Pro-user contract: run heavily and still have tokens left.
+   - **`--audit-only` (legacy review-everything):** set `auto_improve_audit_enabled: true` instead. Every `/fetchjobs` stages every proposal — including cost-only ones — to `data/improve_proposals.jsonl`. Review and approve in **Streamlit → Analytics → Pending Improvements**. Per-change revert lives in the **Improvement History** table below.
+   - **`--restore <change_id>`:** Streamlit "Revert" button on any applied row, or auto-dispatched when next-run regression detection fires. `archive_section` patches reconstitute the section from `semantic_diff.captured_content` and unlink the archive in one transaction.
    - **Manual:** type `/improve` in chat for the original one-at-a-time interactive walkthrough. See `.claude/commands/improve.md`.
 
 ## Snapshot review (optional)

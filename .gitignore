@@ -18,6 +18,7 @@ data/run_diagnostics.jsonl
 data/improve_log.jsonl
 data/improve_proposals.jsonl
 data/improve_changes.jsonl
+data/skill_section_usage.jsonl
 data/pruned_history.jsonl
 data/last_session.json
 

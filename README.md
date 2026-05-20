@@ -106,9 +106,14 @@ See **[Streamlit UI](#streamlit-ui)** below for what the app shows and what to c
 
 ### 6. Self-tune the system
 
-After ~3 successful `/fetchjobs` runs, type **`/improve`** in chat. It audits the per-run
-diagnostics, detects pain points (search too narrow, link validation too aggressive,
-scoring drift, feedback patterns…), and proposes one human-approved edit at a time. See
+For pro users, enable `auto_improve_enabled` in the profile JSON (default for new
+profiles) — every `/fetchjobs` ends with an automatic `/improve --auto` that runs the
+audit, auto-applies Tier 1–4 compaction (hedge cleanup, example externalization,
+cold-section archive, cross-file dedup), and **auto-reverts any prior change whose
+next-run metrics regressed**. Pain-point thresholds activate at `n_priors_used ≥ 1`
+with graduated severity (LOW → MEDIUM → HIGH as priors accumulate). PATTERN_*/SCORING_DRIFT
+proposals still stage to Streamlit for human approval — they change behavior, not just
+cost, so the cost-metric watchlist doesn't safely cover them. See
 **[/improve — self-tuning loop](#improve-loop)**.
 
 ---
@@ -255,43 +260,42 @@ sequenceDiagram
 
 ## <a id="improve-loop"></a>/improve — self-tuning loop
 
-`/improve` is the meta-skill that closes the loop on the rest of the system. It runs
-six phases, each grounded in a recorded artifact:
+`/improve` is the meta-skill that closes the loop on the rest of the system. **Pro-user contract:** run `/fetchjobs` heavily and still have tokens left — the system aggressively compacts cost without ever losing information, and self-heals on the next run if quality regressed.
 
-1. **Ingest evidence** — reads `data/run_diagnostics.jsonl` (per-run telemetry written
-   by `/fetchjobs`), `data/improve_log.jsonl` (history of prior changes),
-   `data/last_session.json` (Claude Code transcript pointer).
-2. **Run efficiency audit** — `uv run python scripts/audit_run_efficiency.py` attributes
-   WebFetch waste (redirect tax, board returns, JS-empty Workday pages, pre-known
-   dead URLs) and computes parallelism candidates.
-3. **Feedback synthesis** — `scripts/synthesize_feedback_patterns.py prepare` builds a
-   status-disentangled good/bad set (Applied-then-Closed stays POSITIVE-GENRE), the LLM
-   proposes hypotheses across company/skill/domain/problem_type axes, then `validate`
-   runs five adversarial gates (citation, counter-evidence, ≥80% confounding).
-4. **Idempotency** — pain points approved in the last 14 days are suppressed unless
-   evidence has worsened ≥10% (`data/improve_log.jsonl`).
-5. **Proposals** — one at a time, with `CURRENT`/`PROPOSED` quoted exactly. Pain-point
-   IDs include `SEARCH_TOO_NARROW`, `LINK_VALIDATION_AGGRESSIVE`, `BOARD_PAGE_LEAKAGE`,
-   `SCORING_DRIFT_DETECTED`, `PATTERN_INCLINATION_FOUND`, `WASTED_FETCH_RATE`,
-   `PRUNER_FPR_ALERT`, etc. Every proposal requires explicit human approval; nothing
-   auto-applies.
-6. **Apply + log** — approved edits are written, then appended to `data/improve_log.jsonl`.
+### Four modes
 
-The full spec lives in `.claude/commands/improve.md`. To run it: type **`/improve`** in
-Claude Code chat. The Analytics page surfaces the most recent entries from
-`data/improve_log.jsonl`.
+| Mode | Trigger | Behavior |
+|------|---------|----------|
+| `--auto` (default for pro users) | auto-dispatched at end of `/fetchjobs` when `auto_improve_enabled` is true | (1) Audit. (2) Self-heal: auto-revert any prior applied change whose next-run metrics regressed (`valid_jobs < 0.85×`, `pct_high_score < 0.85×`, or `tokens_per_valid_job > 1.5×` vs. the change's `pre_metrics`). (3) Walk Tier 1–4 compaction (§0.7 of `.claude/commands/improve.md`); auto-apply each via `apply_proposal(..., pre_metrics=…)` so the *next* run can audit it. (4) Stage PATTERN_*/SCORING_DRIFT_ proposals to Streamlit (those still need human review). (5) Print brief `AUTO_SUMMARY`. |
+| `--audit-only` | `/improve --audit-only` (or auto from `/fetchjobs` when `auto_improve_audit_enabled` is true) | Stages every proposal to `data/improve_proposals.jsonl`; nothing is applied. Review in Streamlit → Analytics → Pending Improvements. |
+| `--apply <change_id>` | Streamlit "Apply approved" button | `apply_proposal(change_id)` — git-tracked files get an `[improve]` commit; gitignored uses structured inverse-op. |
+| `--restore <change_id>` | Streamlit on any applied row, or auto when next-run regression detected | `revert_change(change_id)` — for `archive_section` patches, reconstitutes the section from the change row's `semantic_diff.captured_content` and unlinks the archive. |
 
-### Auto-audit + UI approval (recommended)
+### Compaction tiers (§0.7 of `.claude/commands/improve.md`)
 
-You don't have to type `/improve` after every `/fetchjobs`. Enable the **Auto-improve audit after each /fetchjobs** toggle in the Streamlit sidebar (saves to `candidate_info.json`). After every `/fetchjobs` run, the agent dispatches `/improve --audit-only` automatically:
+| Tier | What it does | Lossless? |
+|------|--------------|-----------|
+| **1** Inline equivalence transforms | Hedge-word removal, prose→bullets, paragraph dedup, "Why this is needed" collapse | Yes by construction (semantic equivalence) |
+| **2** Example externalization | Worked examples (multi-line code blocks > 15 lines) move to `.claude/_archive/`; rule stays inline | Yes — example preserved + stub references it |
+| **3** Cold-section archive | Sections whose backtick fingerprints didn't appear in recent session activity move to `.claude/_archive/<file-stem>__<heading-slug>.md`; 1-line stub replaces them in source | Yes — full content in archive; restorable via `--restore` |
+| **4** Cross-file dedup → thin wrapper | Cursor `.mdc` / `SKILL.md` mirroring `.claude/commands/*.md` collapses to a delegation pointer | Yes — canonical content reachable |
 
-1. The audit detects pain points exactly like the interactive mode (same dedup, same gates).
-2. Each surviving proposal is staged to `data/improve_proposals.jsonl` — **nothing is applied**.
-3. The Streamlit **Analytics → Pending Improvements** table shows every proposal with its evidence, target file, and the exact change preview.
-4. Tick **Approve?** on the rows you want, click **Apply approved**. Tracked files (`.md`, `.py`) get a `[improve]` git commit; gitignored files (`data/candidate_info.json`) use a structured inverse-operation revert (no commit).
-5. Below it, **Improvement History** lists everything applied. Tick **Revert?** and click **Apply reverts** — partial reverts preserve other applied changes by construction.
+The audit (`scripts/audit_run_efficiency.py`) emits the data backing Tier 3 (`cold_sections.candidates` from a 1-run rollup of `data/skill_section_usage.jsonl` with adaptive top-quartile threshold) and the regression watchlist (`auto_revert_candidates`).
 
-The constitutional rule stays intact: **nothing auto-applies**. Audit is automatic; approval is always you.
+### Phases (interactive mode walks them; `--auto` orchestrates them)
+
+1. **Ingest evidence** — `data/run_diagnostics.jsonl` (per-run telemetry), `data/improve_log.jsonl` (history), `data/improve_changes.jsonl` (applied changes + `pre_metrics`), `data/last_session.json` (Claude Code transcript pointer).
+2. **Run efficiency audit** — `uv run python scripts/audit_run_efficiency.py` emits: `efficiency` (current run's `main_tokens`, `valid_jobs`, `tokens_per_valid_job`, `cache_hit_rate`, `subagent_token_share`, `pct_high_score`); `priors` (P50/P90 of those metrics across last 5 runs); `subagent_run_stats` (within-run baseline + `internal_outlier` flagging); `cold_sections` (Tier 3 candidates); `compaction_trend` (3-run `total_skill_bytes` series with `stagnant` flag); `auto_revert_candidates` (recently-applied changes whose post-run metrics regressed); waste buckets and parallelism candidates.
+3. **Feedback synthesis** — `scripts/synthesize_feedback_patterns.py prepare` builds a status-disentangled good/bad set (Applied-then-Closed stays POSITIVE-GENRE), the LLM proposes hypotheses across company/skill/domain/problem_type axes, then `validate` runs five adversarial gates.
+4. **Idempotency** — pain points approved in the last 14 days are suppressed unless evidence has worsened ≥10% (`data/improve_log.jsonl`).
+5. **Proposals + apply** — pain-point IDs include the classic structural ones (`SEARCH_TOO_NARROW`, `LINK_VALIDATION_AGGRESSIVE`, `BOARD_PAGE_LEAKAGE`, `SCORING_TOO_STRICT`, `DOMAIN_BLIND_SPOT`, `WASTED_FETCH_RATE`, `REDIRECT_LATENCY_TAX`, `LATENCY_CRITICAL_PATH`, `PRUNER_FPR_ALERT`) plus token/compaction ones added in 2026-05 (`TOKENS_PER_VALID_JOB_HIGH`, `MAIN_AGENT_CONTEXT_BLOAT`, `MAIN_AGENT_CACHE_MISS_HIGH`, `SUBAGENT_TOKEN_BLOAT` recalibrated to `internal_outlier`, `SKILL_COLD_SECTION_FOUND`, `SKILL_COMPACTION_PLAN` always-on, `COMPACTION_STAGNATION`, `REGRESSION_DETECTED`) plus feedback ones (`PATTERN_INCLINATION_FOUND`, `PATTERN_DISINCLINATION_FOUND`, `PATTERN_LEARN_SKILL_FOUND`, `SCORING_DRIFT_DETECTED`, `LOW_APPLY_CONVERSION`, `NEGATIVE_FOLLOWUP_AVOIDANCE_LOW`, `POSITIVE_FOLLOWUP_RATE_LOW`). Cost-metric pain-points activate at `n_priors_used ≥ 1` with graduated severity.
+6. **Log** — applied changes go to `data/improve_changes.jsonl` (with `pre_metrics` for regression watch) + `data/improve_log.jsonl` (legacy mirror).
+
+### Constitutional rule (revised)
+
+Tier 1 transforms are lossless by construction. Tier 2/3/4 auto-apply BUT every applied change records `pre_metrics` (current run's `valid_jobs`, `pct_high_score`, `tokens_per_valid_job`, `main_tokens`); the NEXT `/improve --auto` cycle's `auto_revert_candidates` block flags regressions and calls `revert_change(change_id)` silently. **The user does not gate every change — the regression watchlist does, computationally, by reading the next run's metrics.** PATTERN_*/SCORING_DRIFT_ proposals still require explicit human approval — they change behavior, not just cost, so the cost-metric watchlist doesn't safely cover them.
+
+The full spec lives in `.claude/commands/improve.md`. The Analytics page surfaces the most recent entries from `data/improve_log.jsonl` plus the live `data/improve_changes.jsonl` rows (status applied / reverted / validated).
 
 ### /improve sequence
 
@@ -307,25 +311,31 @@ sequenceDiagram
     participant App as streamlit app.py
     participant IC as improve_changes.py
 
-    note over A,I: Mode selection (one of three)
-    alt Interactive (typed /improve)
+    note over A,I: Mode selection (one of four)
+    alt Auto (from /fetchjobs when auto_improve_enabled — default for pro users)
+        A->>I: /improve --auto
+    else Interactive (typed /improve)
         A->>I: /improve
-    else Auto-audit (from /fetchjobs when auto_improve_audit_enabled)
+    else Audit-only (from /fetchjobs when auto_improve_audit_enabled)
         A->>I: /improve --audit-only
-    else UI apply (from Streamlit "Apply approved")
-        U->>App: tick Approve, click Apply approved
-        App->>I: /improve --apply [change_id]
+    else UI apply / restore (from Streamlit)
+        U->>App: tick Approve, click Apply approved (or Revert)
+        App->>I: /improve --apply [change_id]  / --restore [change_id]
     end
 
     note over I,D: Phase 1 — Ingest evidence (all modes)
     I->>D: read run_diagnostics.jsonl, improve_log.jsonl, last_session.json
-    I->>D: read skill/command files + candidate_info.json
+    I->>D: read improve_changes.jsonl (applied changes with pre_metrics)
+    I->>D: read skill/command files + candidate_info.json + skill_section_usage.jsonl
     I->>D: read recent_closed_pain_points (14-day dedup)
 
     note over I,Aud: Phase 1.5 — Run efficiency audit
     I->>Aud: uv run python scripts/audit_run_efficiency.py
     Aud->>D: read last_session.json + session JSONL + subagent task outputs
-    Aud-->>I: /tmp/improve_audit.json (waste buckets, parallelism candidates)
+    Aud->>D: read skill files (parse sections, extract fingerprints, scan session refs)
+    Aud->>D: append skill_section_usage.jsonl row (current run's section refs + total_skill_bytes)
+    Aud->>D: read improve_changes.jsonl (cross-ref pre_metrics for regression watch)
+    Aud-->>I: /tmp/improve_audit.json — efficiency, priors, subagent_run_stats,<br/>cold_sections, compaction_trend, auto_revert_candidates,<br/>waste buckets, parallelism candidates
 
     note over I,Syn: Phase 1.7 — Feedback synthesis + efficacy
     I->>Syn: synthesize_feedback_patterns.py prepare
@@ -340,12 +350,49 @@ sequenceDiagram
 
     note over I: Phase 2–3 — Pain-point detection (dedup via improve_log)
 
-    alt mode = interactive
+    alt mode = --auto (default for pro users)
+        note over I,IC: Step 1 — Self-heal (auto-revert prior regressions)
+        loop each change_id in auto_revert_candidates.regressions
+            I->>IC: revert_change(change_id, reverted_by="auto_regression_guard")
+            alt archive_section patch
+                IC->>D: reconstitute section from semantic_diff.captured_content
+                IC->>D: unlink archive_path
+            else text_replace / json_*
+                IC->>D: structured inverse-op or git revert commit_sha
+            end
+            IC-->>I: ok / failed (continue on failure; don't halt cycle)
+        end
+        loop each change_id in auto_revert_candidates.validated
+            I->>D: append {change_id, validated_at} to improve_changes.jsonl
+        end
+
+        note over I,IC: Step 2 — Walk Tier 1–4 compaction; auto-apply with pre_metrics
+        loop each Tier 1/2/3/4 candidate (cap 10 Tier-3 per cycle)
+            I->>IC: write_proposal(...) → change_id
+            I->>IC: apply_proposal(change_id, approved_by="auto",<br/>pre_metrics=&lt;current efficiency&gt;)
+            alt Tier 1 (text_replace) or Tier 4 (text_replace)
+                IC->>D: edit source; [improve] commit if tracked
+            else Tier 2 / Tier 3 (archive_section)
+                IC->>D: mkdir .claude/_archive; write archive file
+                IC->>D: replace section in source with stub_text
+                IC->>D: append change row w/ semantic_diff.captured_content + pre_metrics
+            end
+            IC-->>I: ok / blocked_by_dirty_tree / stale (treat non-ok as soft skip)
+        end
+
+        note over I,A: Step 3 — Stage human-gated proposals to Streamlit
+        loop PATTERN_*, SCORING_DRIFT_, REGRESSION_DETECTED, COMPACTION_STAGNATION
+            I->>IC: write_proposal(...)
+            IC->>D: append improve_proposals.jsonl
+        end
+
+        I->>A: AUTO_SUMMARY — reverted N, applied N (Tier 1/2/3/4 breakdown),<br/>bytes reclaimed, trend Δ, watching next-run change_ids
+    else mode = interactive
         loop one proposal at a time
             I->>A: CURRENT / PROPOSED quoted exactly, evidence cited
             A->>I: approve / reject
             opt approved
-                I->>IC: apply_proposal(...)
+                I->>IC: apply_proposal(..., pre_metrics=&lt;current efficiency&gt;)
                 IC->>D: write change to target file
                 IC->>D: append improve_changes.jsonl + improve_log.jsonl
             end
@@ -421,7 +468,7 @@ sequenceDiagram
 
 - **Preferred file:** `data/candidate_info.json` — used automatically if it exists.
 - The app and `job_finder.config.load_config()` resolve the active path via `job_finder.paths.resolve_active_config_path()`.
-- **User can paste or drop a full JSON** with the canonical keys. Identity / search keys: `core_identity`, `scientific_moat`, `engineering_stack`, `target_seniority`, `target_country`, `priority_domains`, `golden_keywords`, `search_targets`, `noise_keywords`, `peer_companies`, `wisdom`. Self-tuning keys (written by `/improve`'s feedback synthesizer): `inclinations`, `disinclinations`, `learn_skills`. Hard-filter keys (UI-editable exclusions): `excluded_companies`, `excluded_areas`, `excluded_pairs`. Behavior toggle: `auto_improve_audit_enabled` (boolean — when true, every `/fetchjobs` ends with an auto `/improve --audit-only` that stages proposals to `data/improve_proposals.jsonl`). Tier keys (used by the `/fetchjobs` variant dispatcher): `plan_tier` (`"pro"` / `"max5x"` / `"max20x"` — asked once and saved; drives which variant is recommended first) and optional `runtime_mode_override` (`"lean"` / `"full"` / unset — when set, dispatcher silently uses it and skips the per-run prompt). As long as the shape matches the schema in `.cursor/rules/setup_from_resume.mdc`, it will load in the app and in `/fetchjobs` without re-running setup; missing keys are normalized in via `_normalize_config_shape`.
+- **User can paste or drop a full JSON** with the canonical keys. Identity / search keys: `core_identity`, `scientific_moat`, `engineering_stack`, `target_seniority`, `target_country`, `priority_domains`, `golden_keywords`, `search_targets`, `noise_keywords`, `peer_companies`, `wisdom`. Self-tuning keys (written by `/improve`'s feedback synthesizer): `inclinations`, `disinclinations`, `learn_skills`. Hard-filter keys (UI-editable exclusions): `excluded_companies`, `excluded_areas`, `excluded_pairs`. Behavior toggles: `auto_improve_enabled` (boolean — when true, every `/fetchjobs` ends with an auto `/improve --auto` that auto-reverts regressions and auto-applies Tier 1–4 compaction; PATTERN_*/SCORING_DRIFT_ still stage for review). `auto_improve_audit_enabled` (legacy — when true, dispatches `/improve --audit-only` instead, which stages everything to `data/improve_proposals.jsonl` for human approval; use this if you want to review every cost-only change). Tier keys (used by the `/fetchjobs` variant dispatcher): `plan_tier` (`"pro"` / `"max5x"` / `"max20x"` — asked once and saved; drives which variant is recommended first) and optional `runtime_mode_override` (`"lean"` / `"full"` / unset — when set, dispatcher silently uses it and skips the per-run prompt). As long as the shape matches the schema in `.cursor/rules/setup_from_resume.mdc`, it will load in the app and in `/fetchjobs` without re-running setup; missing keys are normalized in via `_normalize_config_shape`.
 
 ---
 
@@ -441,7 +488,7 @@ sequenceDiagram
     participant DT as Discovery Team
     participant SC as Scoring Subagent
     participant PA as Persistence Agent
-    participant IM as /improve --audit-only
+    participant IM as /improve (--auto or --audit-only)
     participant App as streamlit app.py
 
     U->>O: run orchestrator
@@ -535,7 +582,13 @@ sequenceDiagram
     F->>D: token diagnostics backfill (patch latest run_diagnostics row)
     F->>A: print recency-grouped jobs table (this run / active apps / earlier)
 
-    opt auto_improve_audit_enabled
+    alt auto_improve_enabled (default for pro users)
+        F->>IM: dispatch /improve --auto
+        IM->>D: auto-revert regressed prior changes (via revert_change)
+        IM->>D: auto-apply Tier 1-4 compaction (with pre_metrics on each row)
+        IM->>D: stage PATTERN_*/SCORING_DRIFT_ to improve_proposals.jsonl
+        IM->>A: AUTO_SUMMARY (reverted N, applied N, bytes reclaimed, trend Δ)
+    else auto_improve_audit_enabled (legacy — review-everything mode)
         F->>IM: dispatch /improve --audit-only
         IM->>D: stage proposals to data/improve_proposals.jsonl (no auto-apply)
     end

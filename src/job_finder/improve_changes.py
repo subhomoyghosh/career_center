@@ -57,8 +57,32 @@ PATCH_JSON_SET = "json_set"
 PATCH_JSON_APPEND = "json_append"
 PATCH_JSON_REMOVE = "json_remove"
 
+# archive_section: cold-section archive flow for /improve Tier 3. Moves a markdown
+# section out of a skill file to .claude/_archive/<file-stem>__<heading-slug>.md and
+# leaves a one-line stub behind. Reversible via revert_change (stub -> section).
+#
+# Payload shape:
+#   {
+#     "type": "archive_section",
+#     "source_path": "<rel path under PROJECT_ROOT, e.g. .claude/commands/fetchjobs.md>",
+#     "section_heading": "<exact heading text, no leading #s, no trailing whitespace>",
+#     "archive_path": "<rel path; MUST be under .claude/_archive/>",
+#     "stub_text": "<full text of the 1-line stub that replaces the section>",
+#     "source_pre_hash_sha256": "<optional hex precondition>"
+#   }
+PATCH_ARCHIVE_SECTION = "archive_section"
+
+# Directory archive_path must resolve under (anti path-traversal guard).
+ARCHIVE_DIR_REL = os.path.join(".claude", "_archive")
+
 VALID_PATCH_TYPES = frozenset(
-    {PATCH_TEXT_REPLACE, PATCH_JSON_SET, PATCH_JSON_APPEND, PATCH_JSON_REMOVE}
+    {
+        PATCH_TEXT_REPLACE,
+        PATCH_JSON_SET,
+        PATCH_JSON_APPEND,
+        PATCH_JSON_REMOVE,
+        PATCH_ARCHIVE_SECTION,
+    }
 )
 
 # Proposal lifecycle states. Stored in the proposal record's `status` field.
@@ -156,13 +180,21 @@ def dismiss_proposal(change_id: str, reason: str = "user_dismissed") -> Dict[str
     return _update_proposal_status(change_id, PROPOSAL_DISMISSED, reason=reason)
 
 
-def apply_proposal(change_id: str, approved_by: str = "ui_user") -> Dict[str, Any]:
+def apply_proposal(
+    change_id: str,
+    approved_by: str = "ui_user",
+    pre_metrics: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
     """Approve + log one proposal.
 
     Files tracked by git get committed (revert via `git revert`).
     Gitignored files (e.g. data/candidate_info.json — personal data the user
     intentionally keeps out of git) skip the commit; revert uses the semantic
     inverse-op stored in the change record's patch.
+
+    `pre_metrics`, when provided, is stored on the applied-change row so the
+    next /improve audit can compare current efficiency against the snapshot
+    taken at apply time (regression detection in scripts/audit_run_efficiency).
 
     Returns one of:
         {ok: True,  change_id, commit_sha?, semantic_diff, revert_mode}
@@ -213,6 +245,11 @@ def apply_proposal(change_id: str, approved_by: str = "ui_user") -> Dict[str, An
     except SyntaxCheckError as e:
         _update_proposal_status(change_id, PROPOSAL_BLOCKED, reason=f"syntax: {e}")
         return {"ok": False, "reason": "blocked_by_syntax", "detail": str(e)}
+    except PreconditionError as e:
+        # Late drift (e.g. archive_section heading shifted between verify and
+        # execute, or hash mismatch detected at execute time). Surface as stale.
+        _update_proposal_status(change_id, PROPOSAL_STALE, reason=str(e))
+        return {"ok": False, "reason": "stale", "detail": str(e)}
 
     commit_sha: Optional[str] = None
     revert_mode = "semantic"
@@ -247,6 +284,11 @@ def apply_proposal(change_id: str, approved_by: str = "ui_user") -> Dict[str, An
         "reverted": False,
         "revert_commit_sha": None,
         "reverted_at": None,
+        # Snapshot of efficiency metrics at apply time. The next audit's regression
+        # detector (scripts/audit_run_efficiency.compute_recent_apply_regressions)
+        # compares current metrics against this baseline. None when caller did not
+        # provide one (back-compat with older callers).
+        "pre_metrics": pre_metrics,
     }
     _append_jsonl(CHANGES_PATH, change_record)
     _update_proposal_status(change_id, PROPOSAL_APPLIED, reason="ui_user")
@@ -432,6 +474,8 @@ def _revert_via_semantic_inverse(record: Dict[str, Any], reverted_by: str) -> Di
                 }
             _set_keys(cfg, patch["key_path"], patch["old_value"])
             _save_json_file(abs_path, cfg)
+        elif ptype == PATCH_ARCHIVE_SECTION:
+            return _revert_archive_section(record, reverted_by)
         else:
             return {
                 "ok": False,
@@ -440,6 +484,116 @@ def _revert_via_semantic_inverse(record: Dict[str, Any], reverted_by: str) -> Di
             }
     except OSError as e:
         return {"ok": False, "reason": "stale_semantic", "detail": f"file IO failed: {e}"}
+
+    _append_jsonl(
+        CHANGES_PATH,
+        {
+            "event": "revert",
+            "change_id": change_id,
+            "reverted_at": _utc_now_iso(),
+            "reverted_by": reverted_by,
+            "revert_commit_sha": None,
+            "of_commit_sha": record.get("commit_sha"),
+            "revert_mode": "semantic",
+        },
+    )
+    return {
+        "ok": True,
+        "change_id": change_id,
+        "revert_mode": "semantic",
+        "revert_commit_sha": None,
+    }
+
+
+def _revert_archive_section(record: Dict[str, Any], reverted_by: str) -> Dict[str, Any]:
+    """Reverse an archive_section apply: restore the captured section text in
+    place of the stub, then delete the archive file.
+
+    The semantic_diff stored at apply time carries both `captured_content` and
+    `original_level`, which is what we replay here. If those fields are missing
+    (older records, or hand-edited JSONL) we fail loudly rather than guess."""
+    change_id = record["change_id"]
+    patch = record.get("patch") or {}
+    result = record.get("semantic_diff") or {}
+    captured = result.get("captured_content")
+    if captured is None:
+        return {
+            "ok": False,
+            "reason": "stale_semantic",
+            "detail": "archive_section: change record missing captured_content; cannot revert",
+        }
+    source_path = patch.get("source_path") or record.get("file_changed")
+    archive_path = patch.get("archive_path") or result.get("archive_path")
+    stub_text = patch.get("stub_text") or result.get("stub_text")
+    if not source_path or not archive_path or stub_text is None:
+        return {
+            "ok": False,
+            "reason": "stale_semantic",
+            "detail": "archive_section: change record missing source/archive/stub fields",
+        }
+
+    src_abs = _abs_repo_path(source_path)
+    archive_abs = _abs_repo_path(archive_path)
+
+    try:
+        src_text = Path(src_abs).read_text(encoding="utf-8")
+    except OSError as e:
+        return {"ok": False, "reason": "stale_semantic", "detail": f"cannot read {src_abs}: {e}"}
+
+    # Match the stub exactly as we wrote it (with the trailing newline normalization).
+    stub_written = stub_text if stub_text.endswith("\n") else stub_text + "\n"
+    occurrences = src_text.count(stub_written)
+    if occurrences == 0:
+        return {
+            "ok": False,
+            "reason": "stale_semantic",
+            "detail": (
+                f"archive_section: stub text not found in {source_path} — file edited since apply"
+            ),
+        }
+    if occurrences > 1:
+        return {
+            "ok": False,
+            "reason": "conflict",
+            "detail": (
+                f"archive_section: stub text appears {occurrences} times in {source_path}; "
+                "ambiguous revert. Edit manually."
+            ),
+        }
+
+    new_text = src_text.replace(stub_written, captured, 1)
+    try:
+        _write_bytes_atomic(src_abs, new_text.encode("utf-8"))
+    except OSError as e:
+        return {"ok": False, "reason": "stale_semantic", "detail": f"source write failed: {e}"}
+
+    # Best-effort archive cleanup. If it's already gone, that's fine.
+    try:
+        Path(archive_abs).unlink()
+    except FileNotFoundError:
+        pass
+    except OSError as e:
+        # Source already restored; surface this as a warning in the detail.
+        _append_jsonl(
+            CHANGES_PATH,
+            {
+                "event": "revert",
+                "change_id": change_id,
+                "reverted_at": _utc_now_iso(),
+                "reverted_by": reverted_by,
+                "revert_commit_sha": None,
+                "of_commit_sha": record.get("commit_sha"),
+                "revert_mode": "semantic",
+                "warning": f"archive file cleanup failed: {e}",
+            },
+        )
+        return {
+            "ok": True,
+            "change_id": change_id,
+            "revert_mode": "semantic",
+            "revert_commit_sha": None,
+            "warning": f"archive file cleanup failed: {e}",
+        }
 
     _append_jsonl(
         CHANGES_PATH,
@@ -556,6 +710,63 @@ def _validate_proposal_shape(p: Dict[str, Any]) -> None:
         for k in ("key_path", "old_value"):
             if k not in patch:
                 raise ImproveChangeError(f"json_remove patch missing {k}")
+    elif ptype == PATCH_ARCHIVE_SECTION:
+        for k in ("source_path", "section_heading", "archive_path", "stub_text"):
+            if k not in patch:
+                raise ImproveChangeError(f"archive_section patch missing {k}")
+        for k in ("source_path", "archive_path", "section_heading"):
+            if not isinstance(patch[k], str) or not patch[k].strip():
+                raise ImproveChangeError(f"archive_section.{k} must be a non-empty string")
+        if not isinstance(patch["stub_text"], str) or not patch["stub_text"]:
+            raise ImproveChangeError("archive_section.stub_text must be a non-empty string")
+        # Anti path-traversal: archive_path must resolve under .claude/_archive/.
+        _check_archive_path_safe(patch["archive_path"])
+        # Source must exist on disk at proposal-write time (the audit only
+        # generates archive proposals against real files).
+        src_abs = _abs_repo_path(patch["source_path"])
+        if not Path(src_abs).is_file():
+            raise ImproveChangeError(
+                f"archive_section.source_path does not exist: {patch['source_path']}"
+            )
+        if "source_pre_hash_sha256" in patch and not isinstance(
+            patch["source_pre_hash_sha256"], str
+        ):
+            raise ImproveChangeError(
+                "archive_section.source_pre_hash_sha256 must be a hex string when present"
+            )
+
+
+def _check_archive_path_safe(archive_path: str) -> None:
+    """Reject archive_paths that try to escape .claude/_archive/ via traversal or
+    absolute paths. Resolves via Path and checks containment with is_relative_to."""
+    if os.path.isabs(archive_path):
+        raise ImproveChangeError(
+            f"archive_section.archive_path must be a repo-relative path, got absolute: {archive_path}"
+        )
+    # Catch obvious traversal segments before resolve() so the error is precise.
+    parts = Path(archive_path).parts
+    if ".." in parts:
+        raise ImproveChangeError(
+            f"archive_section.archive_path must not contain '..' segments: {archive_path}"
+        )
+    archive_root = (Path(PROJECT_ROOT) / ARCHIVE_DIR_REL).resolve()
+    candidate = (Path(PROJECT_ROOT) / archive_path).resolve()
+    if not _is_relative_to(candidate, archive_root):
+        raise ImproveChangeError(
+            f"archive_section.archive_path must be under {ARCHIVE_DIR_REL}/, got: {archive_path}"
+        )
+
+
+def _is_relative_to(child: Path, parent: Path) -> bool:
+    """Python 3.9+ has Path.is_relative_to; fall back for older runtimes."""
+    try:
+        return child.is_relative_to(parent)  # type: ignore[attr-defined]
+    except AttributeError:
+        try:
+            child.relative_to(parent)
+            return True
+        except ValueError:
+            return False
 
 
 def _make_change_id(pain_point: str) -> str:
@@ -694,6 +905,12 @@ def _capture_precondition(file_changed: str, patch: Dict[str, Any]) -> Dict[str,
             pre["current_value_repr"] = _stable_repr(current)
         except OSError:
             pre["current_value_repr"] = None
+    elif ptype == PATCH_ARCHIVE_SECTION:
+        src_abs = _abs_repo_path(patch["source_path"])
+        try:
+            pre["source_sha256"] = _file_sha256(src_abs)
+        except OSError:
+            pre["source_sha256"] = None
     return pre
 
 
@@ -753,6 +970,57 @@ def _verify_precondition(proposal: Dict[str, Any]) -> None:
             raise PreconditionError(
                 f"json_remove: value at {patch['key_path']} drifted since audit"
             )
+    elif ptype == PATCH_ARCHIVE_SECTION:
+        # Re-validate archive_path containment in case PROJECT_ROOT shifted
+        # between proposal write and apply (or someone hand-edited the JSONL).
+        _check_archive_path_safe(patch["archive_path"])
+        src_abs = _abs_repo_path(patch["source_path"])
+        if not Path(src_abs).is_file():
+            raise PreconditionError(
+                f"archive_section: source {patch['source_path']} no longer exists"
+            )
+        if "source_pre_hash_sha256" in patch and patch["source_pre_hash_sha256"]:
+            try:
+                current_hash = _file_sha256(src_abs)
+            except OSError as e:
+                raise PreconditionError(f"cannot hash {src_abs}: {e}")
+            if current_hash != patch["source_pre_hash_sha256"]:
+                raise PreconditionError(
+                    f"archive_section: source {patch['source_path']} sha256 drifted "
+                    f"since audit (expected {patch['source_pre_hash_sha256'][:12]}, got {current_hash[:12]})"
+                )
+        # Cheap heading-uniqueness pre-check so we surface ambiguity at the
+        # apply step before any file mutation begins.
+        try:
+            text = Path(src_abs).read_text(encoding="utf-8")
+        except OSError as e:
+            raise PreconditionError(f"cannot read {src_abs}: {e}")
+        matches = _find_section_matches(text, patch["section_heading"])
+        if len(matches) == 0:
+            raise PreconditionError(
+                f"archive_section: heading {patch['section_heading']!r} not found in {patch['source_path']}"
+            )
+        if len(matches) > 1:
+            raise PreconditionError(
+                f"archive_section: heading {patch['section_heading']!r} appears "
+                f"{len(matches)} times in {patch['source_path']}; ambiguous"
+            )
+
+
+def _find_section_matches(text: str, heading: str) -> List[Tuple[int, int, int]]:
+    """Return all matches for the section heading as list of (start, end, level).
+
+    Pattern: a line of the form `#{1,4} <heading>` (with no leading whitespace,
+    optional trailing whitespace). Matches are returned as (line_start_offset,
+    line_end_offset, heading_level)."""
+    pattern = re.compile(
+        rf"^(#{{1,4}})\s+{re.escape(heading)}\s*$",
+        re.MULTILINE,
+    )
+    out: List[Tuple[int, int, int]] = []
+    for m in pattern.finditer(text):
+        out.append((m.start(), m.end(), len(m.group(1))))
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -824,7 +1092,111 @@ def _execute_patch(proposal: Dict[str, Any]) -> Dict[str, Any]:
             _write_json_atomic(abs_path, cfg)
         return diff
 
+    if ptype == PATCH_ARCHIVE_SECTION:
+        return _execute_archive_section(patch)
+
     raise ImproveChangeError(f"unknown patch type at execute: {ptype}")
+
+
+def _execute_archive_section(patch: Dict[str, Any]) -> Dict[str, Any]:
+    """Move a markdown section out to .claude/_archive/<...>.md and leave a stub.
+
+    Atomicity contract:
+      1. mkdir -p archive parent
+      2. write archive file
+      3. write modified source file
+      4. if step 3 fails, best-effort delete archive (so retry is clean)
+
+    Returns dict including captured_content + original_level so revert_change
+    can reconstruct the section byte-exact.
+    """
+    # Defensive re-check of archive_path containment at the execute step.
+    _check_archive_path_safe(patch["archive_path"])
+
+    src_abs = _abs_repo_path(patch["source_path"])
+    archive_abs = _abs_repo_path(patch["archive_path"])
+
+    src_bytes = Path(src_abs).read_bytes()
+    src_text = src_bytes.decode("utf-8")
+
+    # Optional sha256 precondition — _verify_precondition already checked, but
+    # we re-check at execute time in case state shifted in the gap.
+    if "source_pre_hash_sha256" in patch and patch["source_pre_hash_sha256"]:
+        actual = hashlib.sha256(src_bytes).hexdigest()
+        if actual != patch["source_pre_hash_sha256"]:
+            raise PreconditionError(
+                f"archive_section: source sha256 mismatch at execute "
+                f"(expected {patch['source_pre_hash_sha256'][:12]}, got {actual[:12]})"
+            )
+
+    matches = _find_section_matches(src_text, patch["section_heading"])
+    if len(matches) == 0:
+        raise PreconditionError(
+            f"archive_section: heading {patch['section_heading']!r} not found in {patch['source_path']}"
+        )
+    if len(matches) > 1:
+        raise PreconditionError(
+            f"archive_section: heading {patch['section_heading']!r} appears "
+            f"{len(matches)} times in {patch['source_path']}; ambiguous"
+        )
+    start, _end, level = matches[0]
+
+    # Find where the section ends: the next heading at level <= `level`, or EOF.
+    next_heading = re.compile(
+        rf"^(#{{1,{level}}})\s+\S",
+        re.MULTILINE,
+    )
+    section_end = len(src_text)
+    for m in next_heading.finditer(src_text, pos=start + 1):
+        section_end = m.start()
+        break
+
+    captured = src_text[start:section_end]
+
+    # Build the new source text with stub_text replacing the section.
+    stub = patch["stub_text"]
+    if not stub.endswith("\n"):
+        stub = stub + "\n"
+    new_src = src_text[:start] + stub + src_text[section_end:]
+
+    # 1. mkdir -p archive parent
+    Path(archive_abs).parent.mkdir(parents=True, exist_ok=True)
+
+    # 2. write archive verbatim (UTF-8 bytes of the captured section)
+    archive_bytes = captured.encode("utf-8")
+    _write_bytes_atomic(archive_abs, archive_bytes)
+
+    # 3. write modified source. On failure, best-effort delete archive.
+    try:
+        _write_bytes_atomic(src_abs, new_src.encode("utf-8"))
+    except OSError as src_err:
+        try:
+            Path(archive_abs).unlink()
+        except OSError:
+            pass  # best-effort; surface the source-write error as primary
+        raise ImproveChangeError(
+            f"archive_section: source write failed (archive cleaned up): {src_err}"
+        ) from src_err
+
+    return {
+        "type": "archive_section",
+        "file": patch["source_path"],
+        "archive_path": patch["archive_path"],
+        "section_heading": patch["section_heading"],
+        "captured_content": captured,
+        "original_level": level,
+        "stub_text": patch["stub_text"],
+        "removed_chars": len(captured),
+        "added_chars": len(stub),
+    }
+
+
+def _write_bytes_atomic(path: str, data: bytes) -> None:
+    """Atomic write of raw bytes — mirrors _write_json_atomic but for text/binary."""
+    tmp = path + ".tmp_improve"
+    with open(tmp, "wb") as f:
+        f.write(data)
+    os.replace(tmp, path)
 
 
 def _stage_and_smoke_test_python(target_abs: str, new_text: str) -> None:
@@ -929,7 +1301,17 @@ def _git_commit_for(proposal: Dict[str, Any]) -> str:
         rel = str(Path(abs_path).relative_to(PROJECT_ROOT))
     except ValueError:
         rel = file_changed
-    add_args = ["add", "--", rel]
+    # archive_section touches an additional file (the new archive file under
+    # .claude/_archive/); stage it alongside the source so the commit is atomic.
+    extra_paths: List[str] = []
+    patch = proposal.get("patch") or {}
+    if patch.get("type") == PATCH_ARCHIVE_SECTION and patch.get("archive_path"):
+        archive_abs = _abs_repo_path(patch["archive_path"])
+        try:
+            extra_paths.append(str(Path(archive_abs).relative_to(PROJECT_ROOT)))
+        except ValueError:
+            extra_paths.append(patch["archive_path"])
+    add_args = ["add", "--", rel, *extra_paths]
     rc_a, _, err_a = _git_run(add_args)
     if rc_a != 0:
         raise subprocess.CalledProcessError(rc_a, add_args, stderr=err_a)
