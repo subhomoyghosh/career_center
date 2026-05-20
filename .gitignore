@@ -16,3 +16,13 @@ data/candidate_info.json
 data/history/
 data/run_diagnostics.jsonl
 data/improve_log.jsonl
+data/improve_proposals.jsonl
+data/improve_changes.jsonl
+data/pruned_history.jsonl
+data/last_session.json
+
+# Scratch files used by /fetchjobs-pro for description externalization
+data/_descriptions/
+data/_fetchjobs_candidates.json
+data/_fetchjobs_scored.json
+data/fpr_recheck_latest.json

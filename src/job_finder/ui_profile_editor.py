@@ -2,6 +2,8 @@ import streamlit as st
 
 from job_finder.config import save_config
 from job_finder.paths import resolve_active_config_path
+from job_finder.ui_data import invalidate_data_cache
+from job_finder.ui_helpers import wisdom_to_table
 
 
 def render_profile_sidebar(profile: dict, config: dict) -> tuple[bool, bool]:
@@ -22,67 +24,115 @@ def render_profile_sidebar(profile: dict, config: dict) -> tuple[bool, bool]:
             if search_targets_list
             else []
         )
+        excluded_companies_list = profile.get("excluded_companies") or []
+        excluded_areas_list = profile.get("excluded_areas") or []
+        excluded_pairs_list = profile.get("excluded_pairs") or []
 
-        new_pitch = st.text_area(
-            "Strategic Pitch",
-            value=profile.get("core_identity", ""),
-            height=100,
-            help="High-level professional narrative.",
-            key="core_identity_pitch",
-        )
-        new_moat = st.text_input(
-            "Scientific moat (comma-sep)",
-            value=", ".join(moat_list),
-            help="5–7 rare, high-barrier skills.",
-        )
-        new_eng = st.text_input(
-            "Engineering stack (comma-sep)",
-            value=", ".join(eng_list),
-            help="Tools and infra e.g. Python, C++, AWS.",
-        )
-        new_seniority = st.text_input(
-            "Target seniority (use forward slashes)",
-            value=profile.get("target_seniority", "Staff / Principal / Lead"),
-        )
         countries = ["USA", "UK", "Canada", "Remote", "Europe"]
         curr_country = profile.get("target_country") or "USA"
         try:
             country_index = countries.index(curr_country) if curr_country in countries else 0
         except (ValueError, TypeError):
             country_index = 0
-        new_country = st.selectbox(
-            "Target Country",
-            countries,
-            index=country_index,
-            key="target_country_select",
-        )
-        new_keys = st.text_input("Search keywords (golden_keywords)", value=profile.get("golden_keywords", ""))
-        new_noise = st.text_input(
-            "Noise keywords (comma-sep)",
-            value=", ".join(noise_list),
-            help="Roles to filter out e.g. Junior, Intern.",
-        )
-        new_priority = st.text_input(
-            "Priority domains (comma-sep)",
-            value=", ".join(priority_list) if isinstance(priority_list, list) else str(priority_list),
-        )
-        new_search_targets = st.text_input(
-            "Search targets / ATS sites (comma-sep)",
-            value=", ".join(search_targets_list)
-            if isinstance(search_targets_list, list)
-            else str(search_targets_list),
-        )
 
-        st.divider()
-        st.caption("Dashboard")
-        show_wisdom = st.toggle("Show Market Intelligence", value=True)
-        show_weight_column = st.toggle(
-            "Show weight column (0–100)",
-            value=True,
-            help="Per-job weight for next /fetchjobs.",
-        )
+        with st.form("candidate_profile_form", clear_on_submit=False, border=False):
+            new_pitch = st.text_area(
+                "Strategic Pitch",
+                value=profile.get("core_identity", ""),
+                height=100,
+                help="High-level professional narrative.",
+                key="core_identity_pitch",
+            )
+            new_moat = st.text_input(
+                "Scientific moat (comma-sep)",
+                value=", ".join(moat_list),
+                help="5–7 rare, high-barrier skills.",
+            )
+            new_eng = st.text_input(
+                "Engineering stack (comma-sep)",
+                value=", ".join(eng_list),
+                help="Tools and infra e.g. Python, C++, AWS.",
+            )
+            new_seniority = st.text_input(
+                "Target seniority (use forward slashes)",
+                value=profile.get("target_seniority", "Staff / Principal / Lead"),
+            )
+            new_country = st.selectbox(
+                "Target Country",
+                countries,
+                index=country_index,
+                key="target_country_select",
+            )
+            new_keys = st.text_input(
+                "Search keywords (golden_keywords)",
+                value=profile.get("golden_keywords", ""),
+            )
+            new_noise = st.text_input(
+                "Noise keywords (comma-sep)",
+                value=", ".join(noise_list),
+                help="Roles to filter out e.g. Junior, Intern.",
+            )
+            new_priority = st.text_input(
+                "Priority domains (comma-sep)",
+                value=", ".join(priority_list) if isinstance(priority_list, list) else str(priority_list),
+            )
+            new_search_targets = st.text_input(
+                "Search targets / ATS sites (comma-sep)",
+                value=", ".join(search_targets_list)
+                if isinstance(search_targets_list, list)
+                else str(search_targets_list),
+            )
 
-        if st.button("Update Profile", use_container_width=True, type="primary", key="save_recalibrate"):
+            with st.expander("Exclusions", expanded=False):
+                new_excl_companies = st.text_input(
+                    "Excluded companies (comma-sep)",
+                    value=", ".join(excluded_companies_list),
+                    help=(
+                        "Case-insensitive EXACT match on company. "
+                        "Example: 'Meta, X Corp'. "
+                        "excluded_* always WINS over peer_companies."
+                    ),
+                    key="excluded_companies_input",
+                )
+                new_excl_areas = st.text_input(
+                    "Excluded areas (comma-sep)",
+                    value=", ".join(excluded_areas_list),
+                    help=(
+                        "Case-insensitive SUBSTRING match on the job theme. "
+                        "Example: 'safety, trust' drops any theme containing those words. "
+                        "Empty entries silently dropped. Exclusion wins over priority_domains."
+                    ),
+                    key="excluded_areas_input",
+                )
+                new_excl_pairs = st.text_input(
+                    "Excluded company:area pairs (comma-sep, format COMPANY:AREA)",
+                    value=", ".join(excluded_pairs_list),
+                    help=(
+                        "Paired AND-match: drops a job only when BOTH company AND theme match. "
+                        "Example: 'OpenAI:safety' keeps OpenAI engineering AND other companies' safety roles."
+                    ),
+                    key="excluded_pairs_input",
+                )
+
+            st.divider()
+            new_auto_audit = st.toggle(
+                "Auto-improve audit after each /fetchjobs",
+                value=bool(config.get("auto_improve_audit_enabled", False)),
+                help=(
+                    "When /fetchjobs finishes, automatically runs /improve --audit-only. "
+                    "Proposals appear in Analytics → Pending Improvements. "
+                    "No edits are auto-applied; every change still requires your click."
+                ),
+                key="auto_improve_audit_toggle",
+            )
+
+            submitted = st.form_submit_button(
+                "Update Profile",
+                use_container_width=True,
+                type="primary",
+            )
+
+        if submitted:
             def to_list(s):
                 return [x.strip() for x in str(s).split(",") if x.strip()]
 
@@ -98,13 +148,45 @@ def render_profile_sidebar(profile: dict, config: dict) -> tuple[bool, bool]:
                 "search_targets": to_list(new_search_targets),
                 "wisdom": config.get("wisdom") or config.get("market_wisdom", ""),
                 "peer_companies": profile.get("peer_companies", []),
+                "excluded_companies": to_list(new_excl_companies),
+                "excluded_areas": to_list(new_excl_areas),
+                "excluded_pairs": to_list(new_excl_pairs),
+                "auto_improve_audit_enabled": bool(new_auto_audit),
             }
             try:
                 save_config(payload)
+                invalidate_data_cache()
+                # Drop the data_editor's positional edit state; rows may have shifted.
+                st.session_state.pop("jobs_editor", None)
                 st.success(f"Configuration synced to {resolve_active_config_path()}!")
                 st.rerun()
             except OSError as e:
                 st.error(f"Could not save: {e}")
 
-    return show_wisdom, show_weight_column
+        st.divider()
+        st.caption("Dashboard")
+        show_wisdom = st.toggle("Show Market Intelligence", value=True)
+        show_weight_column = st.toggle(
+            "Show weight column (0–100)",
+            value=True,
+            help="Per-job weight for next /fetchjobs.",
+        )
 
+        if show_wisdom:
+            st.divider()
+            st.subheader("Market Intelligence")
+            wisdom_text = profile.get("wisdom") or "Awaiting next /fetchjobs run..."
+            wisdom_df = wisdom_to_table(wisdom_text)
+            if not wisdom_df.empty:
+                st.dataframe(
+                    wisdom_df,
+                    column_config={
+                        "Intelligence": st.column_config.TextColumn("Intelligence", width="large"),
+                    },
+                    hide_index=True,
+                    use_container_width=True,
+                )
+            else:
+                st.info(wisdom_text)
+
+    return show_wisdom, show_weight_column

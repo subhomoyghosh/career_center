@@ -10,37 +10,17 @@ from typing import Any, Dict, List
 from job_finder.paths import get_db_path, resolve_active_config_path
 from job_finder.persistence import (
     ensure_feedback_columns,
+    get_high_signal_jobs,
     migrate_jobs_table_drop_legacy_posting_columns,
 )
 from job_finder.wisdom_intel import wisdom_text_to_intelligence_rows
 
 
 def _get_high_signal_jobs(db_path: str, min_weight: int = 70) -> List[dict]:
+    """Delegates to persistence.get_high_signal_jobs so judge/UI share lifecycle semantics."""
     if not os.path.exists(db_path):
         return []
-    conn = sqlite3.connect(db_path)
-    ensure_feedback_columns(conn)
-    migrate_jobs_table_drop_legacy_posting_columns(conn)
-    cur = conn.execute(
-        """SELECT company, title, theme, rationale, user_weight, user_feedback
-           FROM jobs
-           WHERE user_feedback = 'good' OR COALESCE(user_weight, 50) >= ?
-           ORDER BY COALESCE(user_weight, 50) DESC""",
-        (min_weight,),
-    )
-    rows = cur.fetchall()
-    conn.close()
-    return [
-        {
-            "company": r[0],
-            "title": r[1],
-            "theme": r[2],
-            "rationale": r[3],
-            "user_weight": r[4] if r[4] is not None else 50,
-            "user_feedback": r[5],
-        }
-        for r in rows
-    ]
+    return get_high_signal_jobs(db_path=db_path, min_weight=min_weight)
 
 
 def _sample_jobs_link_audit(conn: sqlite3.Connection, limit: int = 10) -> List[dict]:

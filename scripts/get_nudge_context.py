@@ -16,10 +16,22 @@ if _src not in sys.path:
 
 import sqlite3
 
+from job_finder.config import get_exclusions, load_config
 from job_finder.persistence import get_high_signal_jobs
 from job_finder.paths import get_db_path
 
-_STOPWORDS = {"senior", "staff", "principal", "lead", "head", "of", "and", "the", "a", "an", "in", "at", "for", "i", "ii", "iii"}
+_STOPWORDS = {
+    # Seniority + articles + Roman numerals
+    "senior", "staff", "principal", "lead", "head", "of", "and", "the", "a", "an",
+    "in", "at", "for", "i", "ii", "iii",
+    # Role-noun vocabulary present in every title regardless of fit.
+    # Without these, a single bad-feedback rating poisons noise_keywords with
+    # tokens like "data" or "scientist" and silently filters every future job.
+    "data", "scientist", "engineer", "engineering", "ml", "machine", "learning",
+    "applied", "research", "researcher", "analytics", "analyst", "intelligence",
+    "ai", "artificial", "sr", "jr", "junior", "intern", "remote", "hybrid",
+    "onsite", "contract", "fulltime", "full-time",
+}
 
 
 def _bad_title_tokens(db_path: str) -> list:
@@ -43,12 +55,18 @@ def main() -> None:
         return
     jobs = get_high_signal_jobs(min_weight=70)
     bad_tokens = _bad_title_tokens(db_path)
+    cfg = load_config()
+    excl_companies, excl_areas, excl_pairs = get_exclusions(cfg)
     out = {
         "high_signal_jobs": jobs,
         "count": len(jobs),
         "message": f"Use these {len(jobs)} job(s) as positive signals: bias queries and scoring toward similar roles.",
         "bad_feedback_title_tokens": bad_tokens,
         "bad_feedback_note": "Title tokens from user_feedback='bad' jobs, frequency-ranked. Use for CANDIDATE_PROFILE_DRIFT: propose adding top tokens to noise_keywords if absent.",
+        "excluded_companies": excl_companies,
+        "excluded_areas": excl_areas,
+        "excluded_pairs": [f"{c}:{a}" for c, a in excl_pairs],
+        "exclusions_note": "Hard filter — never propose roles at these companies, in themes substring-matching these areas, or matching company:area pairs. Excluded lists take precedence over peer_companies.",
     }
     print(json.dumps(out, indent=2))
 

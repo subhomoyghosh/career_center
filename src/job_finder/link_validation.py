@@ -1,14 +1,25 @@
 """
 Filter job dicts to only those whose link is accessible and the page looks like a live job listing.
 Second pass before persist_jobs; input is not mutated.
+
+Diagnostic summarizers below (compute_pruner_fpr_alert / count_stale_links_*) are
+called by the Persistence Agent during /fetchjobs Step 7 to emit run_diagnostics
+fields; the agent does the HEAD probes and writes data/fpr_recheck_latest.json,
+these functions only summarize the latest artifact + DB state.
 """
+import json
 import logging
+import os
 import re
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from urllib.parse import urlparse
-from typing import Any, List
+from typing import Any, Dict, List, Optional
 
 import requests
+
+from job_finder.paths import get_data_dir, get_db_path
 
 logger = logging.getLogger(__name__)
 
@@ -27,12 +38,9 @@ DEAD_PAGE_PHRASES = [
     "404 not found",
     "page not found",
     "this job has been removed",
-    "position has been filled",
     "job has been closed",
     "no longer accepting applications",
-    "this position is no longer",
     "role has been filled",
-    "listing has expired",
     "unable to find this job",
     "job not found",
     "doesn't exist",
@@ -41,6 +49,14 @@ DEAD_PAGE_PHRASES = [
     "something went wrong",
     "access denied",
 ]
+
+# Highly specific phrases — a single match is sufficient to mark dead.
+STRONG_DEAD_PHRASES = (
+    "this job is no longer",
+    "this position is no longer",
+    "position has been filled",
+    "listing has expired",
+)
 
 # If body is huge but these dominate, treat as board index not a single job (heuristic).
 _BOARD_ONLY_HINTS = (
@@ -96,6 +112,25 @@ def _normalize_link(link: Any) -> str:
     if "." in low and "/" in raw and " " not in raw and "\n" not in raw and "\t" not in raw:
         return "https://" + raw
     return ""
+
+
+def _classify_status(status_code: int) -> str:
+    """Bucket an HTTP status into success/terminal/transient/other.
+
+    - terminal: listing is genuinely gone (404, 410). Drop the job.
+    - transient: bot-block / rate-limit / server hiccup (403, 408, 425, 429, 5xx).
+      Keep the job; a real death will reappear next run.
+    - success: 2xx — proceed to content check.
+    - other: anything else (e.g. 3xx that didn't redirect, unusual 4xx).
+      Treated as terminal (legacy behavior).
+    """
+    if 200 <= status_code < 300:
+        return "success"
+    if status_code in (404, 410):
+        return "terminal"
+    if status_code in (403, 408, 425, 429) or 500 <= status_code < 600:
+        return "transient"
+    return "terminal"
 
 
 def _fetch_response(url: str, timeout_sec: int, session: requests.Session):
@@ -196,9 +231,13 @@ def _body_parseable_and_not_dead(
             )
         ):
             return False
-    for phrase in DEAD_PAGE_PHRASES:
-        if phrase.lower() in lower:
-            return False
+    # Strong phrases are specific enough that one match implies dead.
+    if any(phrase in lower for phrase in STRONG_DEAD_PHRASES):
+        return False
+    # Generic phrases are too loose individually; require >=2 distinct matches.
+    distinct_dead_hits = sum(1 for phrase in DEAD_PAGE_PHRASES if phrase.lower() in lower)
+    if distinct_dead_hits >= 2:
+        return False
     if job_title and _looks_like_board_without_job(job_title, lower):
         return False
     if job_title and not _title_words_echoed_in_body(job_title, lower):
@@ -256,6 +295,8 @@ def filter_valid_job_links(
         "invalid_link": invalid_link_count,
         "fetch_none": 0,
         "http_non_2xx": 0,
+        "http_terminal_4xx": 0,
+        "http_transient": 0,
         "content_failed": 0,
         "returned": 0,
     }
@@ -269,16 +310,15 @@ def filter_valid_job_links(
 
     # Phase 2: parallel HTTP fetches — one thread per candidate, bounded by max_workers.
     # requests.Session is thread-safe for concurrent reads; connection pool is shared.
-    session = requests.Session()
-    session.max_redirects = 5
+    with requests.Session() as session:
+        session.max_redirects = 5
 
-    def _fetch(args):
-        job, link_norm = args
-        return job, link_norm, _fetch_response(link_norm, timeout_sec, session)
+        def _fetch(args):
+            job, link_norm = args
+            return job, link_norm, _fetch_response(link_norm, timeout_sec, session)
 
-    fetch_results: List[tuple] = []
-    with ThreadPoolExecutor(max_workers=min(max_workers, len(candidates))) as pool:
-        fetch_results = list(pool.map(_fetch, candidates))
+        with ThreadPoolExecutor(max_workers=min(max_workers, len(candidates))) as pool:
+            fetch_results: List[tuple] = list(pool.map(_fetch, candidates))
 
     # Phase 3: content checks — CPU-bound string ops, serial, fast.
     valid = []
@@ -291,8 +331,19 @@ def filter_valid_job_links(
         if r is None:
             counters["fetch_none"] += 1
             continue
-        if not (200 <= r.status_code < 300):
+        status_bucket = _classify_status(r.status_code)
+        if status_bucket == "terminal":
+            counters["http_terminal_4xx"] += 1
             counters["http_non_2xx"] += 1
+            continue
+        if status_bucket == "transient":
+            counters["http_transient"] += 1
+            counters["http_non_2xx"] += 1
+            # Keep the job alive this run; transient errors don't persist for weeks.
+            job2 = dict(job)
+            job2["link"] = link_norm
+            job2["link_validation_transient"] = True
+            valid.append(job2)
             continue
         if check_content:
             tcheck = "" if relax_title else title
@@ -367,3 +418,154 @@ def filter_valid_job_links(
         + ", ".join(f"{k}={v}" for k, v in counters.items())
     )
     return valid
+
+
+# --- Diagnostic summarizers (consumed by /fetchjobs Step 7) -------------------
+#
+# Idempotent, side-effect-free. Each returns zeros/False when the underlying
+# artifact or column is missing, so the diagnostics line always emits cleanly.
+
+_FPR_RECHECK_ARTIFACT = "fpr_recheck_latest.json"
+_FPR_ALERT_THRESHOLD = 0.05
+_FPR_MIN_SAMPLE = 10
+
+
+def _fpr_artifact_path() -> str:
+    return os.path.join(get_data_dir(), _FPR_RECHECK_ARTIFACT)
+
+
+def compute_pruner_fpr_alert(
+    artifact_path: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Summarize the latest pruner FPR re-check artifact.
+
+    Returns {'pruner_fpr_alert': bool, 'fpr': float, 'sample_size': int,
+    'resurrected_ids': List[str]}. If the artifact does not exist or the sample
+    is below _FPR_MIN_SAMPLE (10), the alert is False and fpr is 0.0.
+
+    The artifact at data/fpr_recheck_latest.json is written by the Persistence
+    Agent after it HEAD-checks links sampled via sample_pruned_links_for_fpr_check.
+    Expected schema (any missing field is treated as zero/empty):
+      {"sample_size": int, "resurrected": [{"link": str, ...}, ...]}
+    """
+    path = Path(artifact_path or _fpr_artifact_path())
+    zero = {
+        "pruner_fpr_alert": False,
+        "fpr": 0.0,
+        "sample_size": 0,
+        "resurrected_ids": [],
+    }
+    if not path.exists():
+        return zero
+    try:
+        with path.open("r") as f:
+            rec = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return zero
+    if not isinstance(rec, dict):
+        return zero
+    try:
+        sample_size = int(rec.get("sample_size", 0) or 0)
+    except (TypeError, ValueError):
+        sample_size = 0
+    resurrected = rec.get("resurrected") or []
+    if not isinstance(resurrected, list):
+        resurrected = []
+    resurrected_ids = [
+        str(r.get("link", "")) for r in resurrected
+        if isinstance(r, dict) and r.get("link")
+    ]
+    if sample_size < _FPR_MIN_SAMPLE:
+        return {
+            "pruner_fpr_alert": False,
+            "fpr": 0.0,
+            "sample_size": sample_size,
+            "resurrected_ids": resurrected_ids,
+        }
+    fpr = len(resurrected_ids) / sample_size if sample_size > 0 else 0.0
+    return {
+        "pruner_fpr_alert": fpr > _FPR_ALERT_THRESHOLD,
+        "fpr": fpr,
+        "sample_size": sample_size,
+        "resurrected_ids": resurrected_ids,
+    }
+
+
+def _open_jobs_db(db_path: Optional[str]) -> Optional[sqlite3.Connection]:
+    """Open the jobs DB read-only-safe. Returns None if the file is missing
+    or the jobs table does not yet exist."""
+    path = db_path or get_db_path()
+    if not os.path.exists(path):
+        return None
+    try:
+        conn = sqlite3.connect(path)
+    except sqlite3.Error:
+        return None
+    try:
+        cur = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='jobs'"
+        )
+        if cur.fetchone() is None:
+            conn.close()
+            return None
+    except sqlite3.Error:
+        conn.close()
+        return None
+    return conn
+
+
+def _jobs_columns(conn: sqlite3.Connection) -> List[str]:
+    try:
+        cur = conn.execute("PRAGMA table_info(jobs)")
+        return [row[1] for row in cur.fetchall()]
+    except sqlite3.Error:
+        return []
+
+
+def count_stale_links_quarantined(db_path: Optional[str] = None) -> int:
+    """Return COUNT(*) of jobs.status = 'quarantine'. Returns 0 if the DB,
+    table, or status column is missing."""
+    conn = _open_jobs_db(db_path)
+    if conn is None:
+        return 0
+    try:
+        if "status" not in _jobs_columns(conn):
+            return 0
+        cur = conn.execute(
+            "SELECT COUNT(*) FROM jobs WHERE status = 'quarantine'"
+        )
+        row = cur.fetchone()
+        return int(row[0]) if row and row[0] is not None else 0
+    except sqlite3.Error:
+        return 0
+    finally:
+        conn.close()
+
+
+def count_stale_links_ttl_expired(
+    db_path: Optional[str] = None,
+    ttl_days: int = 60,
+) -> int:
+    """Return COUNT(*) of rows whose last_validated_at is older than ttl_days.
+
+    Returns 0 if the DB, table, or last_validated_at column is missing.
+    Rows with NULL last_validated_at are excluded (treated as not-yet-validated).
+    """
+    conn = _open_jobs_db(db_path)
+    if conn is None:
+        return 0
+    try:
+        if "last_validated_at" not in _jobs_columns(conn):
+            return 0
+        cur = conn.execute(
+            "SELECT COUNT(*) FROM jobs "
+            "WHERE last_validated_at IS NOT NULL "
+            "AND julianday('now') - julianday(last_validated_at) > ?",
+            (ttl_days,),
+        )
+        row = cur.fetchone()
+        return int(row[0]) if row and row[0] is not None else 0
+    except sqlite3.Error:
+        return 0
+    finally:
+        conn.close()

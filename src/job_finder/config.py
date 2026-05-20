@@ -37,6 +37,36 @@ def _to_list_of_str(x: Any) -> list:
     return [str(x).strip()]
 
 
+def _normalize_excluded_simple(x: Any) -> list:
+    items = _to_list_of_str(x)
+    out = []
+    for s in items:
+        s2 = s.strip().lower()
+        if s2:
+            out.append(s2)
+    seen: set = set()
+    return [v for v in out if not (v in seen or seen.add(v))]
+
+
+def _normalize_excluded_pairs(x: Any) -> list:
+    items = _to_list_of_str(x)
+    out = []
+    seen: set = set()
+    for raw in items:
+        if ":" not in raw:
+            continue
+        company, _, area = raw.partition(":")
+        company = company.strip().lower()
+        area = area.strip().lower()
+        if not company or not area:
+            continue
+        norm = f"{company}:{area}"
+        if norm not in seen:
+            seen.add(norm)
+            out.append(norm)
+    return out
+
+
 def _normalize_config_shape(config: dict) -> dict:
     """
     Best-effort normalization that preserves existing values.
@@ -58,6 +88,16 @@ def _normalize_config_shape(config: dict) -> dict:
     out["noise_keywords"] = _to_list_of_str(out.get("noise_keywords", []))
     out["wisdom"] = _to_str(out.get("wisdom", ""), "")
     out["peer_companies"] = _to_list_of_str(out.get("peer_companies", []))
+    out["excluded_companies"] = _normalize_excluded_simple(out.get("excluded_companies", []))
+    out["excluded_areas"] = _normalize_excluded_simple(out.get("excluded_areas", []))
+    out["excluded_pairs"] = _normalize_excluded_pairs(out.get("excluded_pairs", []))
+
+    # Synthesized revealed-preference patterns (Item G).
+    # Each is List[dict]; preserved verbatim if already a list, defaulted to [] otherwise.
+    # Soft-bias signals only — never a hard discovery filter (see Discovery non-degradation rule).
+    for _k in ("inclinations", "disinclinations", "learn_skills"):
+        _v = out.get(_k, [])
+        out[_k] = _v if isinstance(_v, list) else []
 
     # Legacy/alias keys sometimes used by the app's `_profile()` normalization.
     if "priority_industries" in out:
@@ -111,8 +151,16 @@ def save_config(config: dict, path: Optional[str] = None, record_snapshot: bool 
     """
     config_path = path or resolve_active_config_path()
     os.makedirs(os.path.dirname(config_path) or ".", exist_ok=True)
+    existing: dict = {}
+    if os.path.isfile(config_path):
+        try:
+            with open(config_path, "r", encoding="utf-8") as _f:
+                existing = json.load(_f) or {}
+        except (OSError, json.JSONDecodeError):
+            existing = {}
+    merged = {**existing, **(config or {})}
     with open(config_path, "w", encoding="utf-8") as f:
-        json.dump(config, f, indent=2)
+        json.dump(merged, f, indent=2)
     if record_snapshot:
         try:
             from job_finder.history import record_candidate_snapshot
@@ -137,10 +185,32 @@ def empty_template() -> dict:
         "engineering_stack": [],
         "target_seniority": "",
         "target_country": "USA",
+        "auto_improve_audit_enabled": False,
         "priority_domains": [],
         "golden_keywords": "",
         "search_targets": [],
         "noise_keywords": ["Junior", "Intern", "Contract"],
         "wisdom": "",
         "peer_companies": [],
+        # Item G — revealed-preference patterns synthesized from user_feedback/user_weight.
+        # See scripts/synthesize_feedback_patterns.py. Used as +5/-5/+3 soft bias in scoring.
+        "inclinations": [],
+        "disinclinations": [],
+        "learn_skills": [],
+        "excluded_companies": [],
+        "excluded_areas": [],
+        "excluded_pairs": [],
     }
+
+
+def get_exclusions(config: dict) -> tuple:
+    """Return (companies, areas, pairs) normalized for filter-time use.
+
+    Re-normalizes at the call site so a hand-edited JSON between load and use
+    cannot inject empty entries that would substring-match every theme.
+    """
+    companies = _normalize_excluded_simple(config.get("excluded_companies", []))
+    areas = _normalize_excluded_simple(config.get("excluded_areas", []))
+    pairs_raw = _normalize_excluded_pairs(config.get("excluded_pairs", []))
+    pairs = [tuple(p.split(":", 1)) for p in pairs_raw]
+    return companies, areas, pairs

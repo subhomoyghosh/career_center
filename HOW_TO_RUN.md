@@ -1,20 +1,48 @@
 # How to Run
 
-1. `uv run python reset.py`
-2. `uv run python orchestrator.py`
-3. Add your resume PDF to `data/`
-   - filename should contain `resume` (example: `my_resume.pdf`)
-4. Run `/setup` in chat
-5. Run `/fetchjobs` in chat
-6. Open UI:
-   - `uv run streamlit run app.py`
-7. Add feedback (Good/Bad + weight) in UI and rerun `/fetchjobs`
-8. Review snapshots for full history
+The workflow uses three slash commands in chat (`/setup`, `/fetchjobs`, `/improve`) and one
+Streamlit UI. Steps 1–2 are one-time. Steps 5–8 form the steady-state loop.
+
+1. `uv run python reset.py` — only when starting fresh; clears `data/` (keeps resume PDF).
+2. `uv run python orchestrator.py` — creates `data/`, empty `candidate_info.json`, and the jobs DB.
+3. Drop your resume PDF in `data/`. Filename must contain `resume` (e.g. `my_resume.pdf`).
+4. **`/setup`** in chat (Cursor or Claude Code) — agent reads the resume, proposes a profile JSON, asks once which Claude Code plan you're on (Pro / Max 5x / Max 20x → saved as `plan_tier`), saves to `data/candidate_info.json`.
+5. **`/fetchjobs`** in chat — opens with a variant prompt:
+   - **Lean** (Sonnet 4.6, ~10 turns, ~500K tokens) — fits a Pro 5-hour rate-limit window. Externalizes job descriptions to `data/_descriptions/` and runs a background Scoring Subagent.
+   - **Full** (Opus 4.7, ~150 turns, ~20M tokens) — needs a Max plan budget. The orchestrator + Context/Discovery/Persistence teams flow.
+
+   The dispatcher lists the *recommended* variant first based on your `plan_tier` (Lean for Pro, Full for Max), but anyone can pick either. To skip the prompt forever, set `"runtime_mode_override": "lean"` (or `"full"`) in `data/candidate_info.json`. To bypass the dispatcher entirely, type **`/fetchjobs-pro`** directly — that always runs Lean.
+6. **`uv run streamlit run app.py`** — open the Career Command Center UI.
+   - Edit profile in the sidebar, click **Update Profile**.
+   - Optional **Exclusions** expander: drop in `excluded_companies` (exact match),
+     `excluded_areas` (substring on `theme`), and `excluded_pairs`
+     (`company:area`, AND-match). Enforced both at `/fetchjobs` Step 3 and as a
+     backstop in `persist_jobs`; the latter exposes `dropped_by_exclusion` and
+     `exclusion_backstop_failed` counters in the debug summary so silent
+     misconfigurations surface.
+   - Set per-row **Lifecycle** (`New`/`Applied`/`InProgress`/`Closed`/`Won`/`NotForMe`),
+     **Good/Bad**, and **Weight** in the table; click **Save feedback & status**.
+     `Applied`/`InProgress`/`Closed`/`Won` stay POSITIVE-GENRE (the next search
+     keeps nudging toward similar roles even after the specific row is closed).
+7. Rerun **`/fetchjobs`** — new feedback/status biases the next search.
+8. **`/improve`** — two modes:
+   - **Auto-audit (recommended):** turn on the sidebar toggle "Auto-improve audit after each /fetchjobs". Every `/fetchjobs` then auto-runs `/improve --audit-only` and stages proposals to `data/improve_proposals.jsonl`. Review and approve them in **Streamlit → Analytics → Pending Improvements**. Per-change revert lives in the **Improvement History** table below.
+   - **Manual:** type `/improve` in chat for the original one-at-a-time interactive walkthrough. See `.claude/commands/improve.md`.
 
 ## Snapshot review (optional)
+
+Each `Update Profile` / `Save feedback` / `/fetchjobs` / wisdom update appends to
+`data/history/*.db`. To inspect:
 
 ```bash
 uv run python scripts/snapshot_history.py candidate
 uv run python scripts/snapshot_history.py jobs
 uv run python scripts/snapshot_history.py intelligence
 ```
+
+## `uv` virtualenv warning
+
+If you see `VIRTUAL_ENV=… does not match the project environment path`, that's a benign
+notice from another project's `.venv` being active in your shell. Either run with
+`uv run --active …` or `deactivate` the other env first. The job_finder commands work
+either way.

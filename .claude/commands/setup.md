@@ -80,6 +80,11 @@ Resumes are often generic: "Data Scientist with 5+ years building ML models," "E
 ### 10. wisdom
 - Leave as **`""`**. It is filled later by /fetchjobs.
 
+### 11. plan_tier (Claude Code subscription)
+- **What:** Which Claude Code plan the user is on. Controls which `/fetchjobs` variant runs (Max-tier uses Opus + verbose chat; Pro-tier uses Sonnet + description-externalized scoring to fit a Pro 5-hour rate window).
+- **How to fill:** Cannot be inferred from the resume — ask the user via `AskUserQuestion` at the END of the /setup flow (after presenting the inferred JSON). Options: `Pro ($20/mo)` → save as `"pro"`; `Max 5x ($100/mo)` → save as `"max5x"`; `Max 20x ($200/mo)` → save as `"max20x"`.
+- **Default if user skips:** leave as `""`. The `/fetchjobs` dispatcher will ask again on first invocation.
+
 ---
 
 ## Output schema (flat, for `data/candidate_info.json`)
@@ -95,7 +100,8 @@ Resumes are often generic: "Data Scientist with 5+ years building ML models," "E
   "golden_keywords": "",
   "search_targets": ["lever.co", "greenhouse.io", "ashbyhq.com", "workday.com", "jobs.lever.co", "boards.greenhouse.io", "linkedin.com/jobs"],
   "noise_keywords": ["Junior", "Intern", "Web Developer", "Front End", "Marketing Analyst", "Business Intelligence", "Entry Level", "Contract"],
-  "wisdom": ""
+  "wisdom": "",
+  "plan_tier": ""
 }
 ```
 
@@ -104,6 +110,7 @@ Resumes are often generic: "Data Scientist with 5+ years building ML models," "E
 ## Steps
 
 1. **Find the resume PDF:** List `data/` (e.g. `ls data/`). Pick any file that (a) ends with `.pdf` and (b) has **"resume"** in the filename (case-insensitive). Use that path to read the PDF. If none exists, tell the user to add a resume PDF with "resume" in the filename and try again.
-2. **Infer** each field using the map above. Fill the JSON. Leave `wisdom` as `""`.
-3. **Present** the full JSON to the user. Say: *"I've analyzed your resume; here is the identity and moat I've built for you. Review and edit if needed. Shall I save this to data/candidate_info.json (or your existing profile path)?"*
-4. **Do not** run /fetchjobs in this flow. Only after the user confirms (and optionally saves) should they run `/fetchjobs` separately.
+2. **Infer** each field using the map above. Fill the JSON. Leave `wisdom` and `plan_tier` as `""`.
+3. **Ask `plan_tier`** via `AskUserQuestion` (cannot be inferred from resume — it's a subscription/budget question). Question: "Which Claude Code plan are you on? (controls whether /fetchjobs uses the full Opus-tier flow or the Sonnet-tier sharded variant)". Options: `Pro ($20/mo)` → `"pro"`; `Max 5x ($100/mo)` → `"max5x"`; `Max 20x ($200/mo)` → `"max20x"`. Save the lowercase key (`pro` / `max5x` / `max20x`) into the proposed JSON's `plan_tier` field. If the user skips, leave `""` — the /fetchjobs dispatcher will ask again on first run.
+4. **Present** the full JSON to the user. Say: *"I've analyzed your resume; here is the identity and moat I've built for you. Review and edit if needed. Shall I save this to data/candidate_info.json (or your existing profile path)?"*
+5. **Do not** run /fetchjobs in this flow. Only after the user confirms (and optionally saves) should they run `/fetchjobs` separately.
