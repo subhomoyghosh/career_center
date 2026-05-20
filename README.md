@@ -1,6 +1,6 @@
 # Career Command Center
 
-Standalone, self-sufficient autonomous job-search package. Follow the steps below. Use **terminal** for the orchestrator and app; use **AI Chat** (Cursor or Claude Code) for setup and job search.
+Standalone, self-sufficient autonomous job-search package. Follow the steps below. Use **terminal** for the orchestrator and app; use **AI Chat** (Claude Code) for setup and job search.
 
 🎙️ **[Listen to the 90-second intro](assets/command_center_voice_over.mp3)** — what this is and how it works.
 
