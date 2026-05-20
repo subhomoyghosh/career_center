@@ -58,6 +58,17 @@ STRONG_DEAD_PHRASES = (
     "listing has expired",
 )
 
+# Tense-agnostic "removed" patterns. builtin.com renders e.g.
+# "Sorry, this job was removed at HH:MM (CST) on ..." with the full original
+# description still below; only the phrase signal can catch it.
+STRONG_DEAD_REGEXES = (
+    re.compile(
+        r"(?:this\s+)?(?:job|position|listing|posting)s?\s+"
+        r"(?:was|were|has\s+been|have\s+been)\s+removed",
+        re.IGNORECASE,
+    ),
+)
+
 # If body is huge but these dominate, treat as board index not a single job (heuristic).
 _BOARD_ONLY_HINTS = (
     "all jobs",
@@ -77,6 +88,19 @@ MIN_BODY_CHARS = 400
 MIN_BODY_CHARS_LINKEDIN = 150
 MIN_BODY_CHARS_RELAXED = 200
 MIN_TITLE_ECHO_CHARS = 12
+
+# Strip <script>/<style> blocks and all tags. A SPA shell like Workday's
+# myworkdayjobs.com is ~6 KB of markup but ~0 chars of visible text — content
+# is loaded by JS we can't execute. Visible-text length tells live pages apart
+# from shells regardless of which board served them.
+_TAG_STRIP_RE = re.compile(
+    r"<script\b[^>]*>.*?</script>|<style\b[^>]*>.*?</style>|<[^>]+>",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def _visible_text_len(html: str) -> int:
+    return len(re.sub(r"\s+", " ", _TAG_STRIP_RE.sub(" ", html)).strip())
 
 
 def _link_valid(link: str) -> bool:
@@ -217,6 +241,8 @@ def _body_parseable_and_not_dead(
         return False
     if not text or len(text.strip()) < min_body_chars:
         return False
+    if _visible_text_len(text) < min_body_chars // 2:
+        return False
     lower = text.lower()
     if is_linkedin:
         # LinkedIn often returns sign-in / bot interstitials with 200s; reject those.
@@ -233,6 +259,8 @@ def _body_parseable_and_not_dead(
             return False
     # Strong phrases are specific enough that one match implies dead.
     if any(phrase in lower for phrase in STRONG_DEAD_PHRASES):
+        return False
+    if any(rx.search(lower) for rx in STRONG_DEAD_REGEXES):
         return False
     # Generic phrases are too loose individually; require >=2 distinct matches.
     distinct_dead_hits = sum(1 for phrase in DEAD_PAGE_PHRASES if phrase.lower() in lower)
