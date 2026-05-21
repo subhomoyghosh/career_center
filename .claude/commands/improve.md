@@ -126,27 +126,9 @@ If snapshot DB has < 2 entries, efficacy report emits `audit_failed: true` and y
 
 ---
 
-## 1.8 Idempotency — dedup against improve_log
+## 1.8 Idempotency — dedup against improve_log *(archived: see .claude/_archive/improve__1-8-idempotency-dedup-against-improve-log.md; restore via /improve --restore COMPACT-2026-05-20-B)*
 
-```bash
-uv run python -c "
-import json, pathlib, datetime
-p = pathlib.Path('data/improve_log.jsonl')
-entries = [json.loads(l) for l in p.read_text().strip().splitlines() if l.strip()] if p.exists() else []
-# Pain-points approved in the last 14 days are considered 'recently closed' and should not re-propose
-# unless their evidence metric has materially worsened (≥10% delta from the value recorded in the log).
-cutoff = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(days=14)).isoformat()
-recent = [e for e in entries if e.get('timestamp', '') >= cutoff]
-print(json.dumps({'recent_closed_pain_points': sorted({e['pain_point'] for e in recent}), 'recent_evidence_by_pp': {e['pain_point']: e.get('evidence', '') for e in recent}}, indent=2))
-" > /tmp/improve_dedup.json
-cat /tmp/improve_dedup.json
-```
-
-In Section 3 pain-point detection, BEFORE printing each FOUND pain-point: check the `recent_closed_pain_points` list. If the pain-point id appears there AND the current metric value is within 10% of the logged evidence value (i.e., no material drift), DROP it from the FOUND set and instead include it under a `SUPPRESSED (recently closed):` section. Print the suppressed list at the bottom of PAIN_POINT_REPORT so the user can see what was filtered.
-
-If the user wants to force re-propose anyway, they can pass an explicit override (e.g., `/improve --force <PAIN_POINT_ID>`) — but no auto-resurfacing inside the 14-day window without ≥10% metric worsening.
-
-**Note:** `data/improve_changes.jsonl` (written by `job_finder.improve_changes.apply_proposal`) and `data/improve_log.jsonl` (legacy mirror) are both written on every apply — dedup in this section reads `improve_log.jsonl` for back-compat. Don't migrate dedup off it without a coordinated change.
+Run the bash block from the archive file → `/tmp/improve_dedup.json`. In §3 detection: suppress any FOUND pain-point whose id appears in `recent_closed_pain_points` AND whose current metric is within 10% of the logged value; print suppressed list at bottom of report. Re-propose override: `/improve --force <ID>`.
 
 ---
 
@@ -320,66 +302,17 @@ uv run python -c "import json,pathlib; p=pathlib.Path('data/candidate_info.json'
 
 ---
 
-## 5. Apply approved changes (interactive mode only)
+## 5. Apply approved changes (interactive mode only) *(archived: see .claude/_archive/improve__5-apply-approved-changes-interactive-mode-only.md; restore via /improve --restore COMPACT-2026-05-20-C)*
 
-> Mode dispatch: `--audit-only` → skip this section (proposals serialized in §4.1 for Streamlit approval). `--apply <change_id>` → call `apply_proposal(change_id)` and exit. `--restore <change_id>` → call `revert_change(change_id, reverted_by="ui_user")` and exit. `--auto` → run the auto-orchestration loop (§5.5). The numbered steps below apply only to the interactive default.
-
-Per approved proposal:
-
-1. Edit the file (Edit tool for `.md`/`.mdc`, Python for `.json`).
-2. Read changed section back to verify.
-3. Append to `data/improve_log.jsonl`:
-
-```bash
-uv run python -c "
-import json,pathlib,datetime
-entry={'timestamp':datetime.datetime.utcnow().isoformat(),'pain_point':'<ID>','severity':'<S>','file_changed':'<path>','section':'<h>','evidence':'<metric=val>','approved_by':'user','summary':'<1 sentence>'}
-pathlib.Path('data/improve_log.jsonl').open('a').write(json.dumps(entry)+'\n')
-"
-```
-
-4. Print `✓ Applied: <ID> → <file>`
-
-If user modified the proposal text, apply verbatim and log `"approved_by":"user_modified"`.
+Mode dispatch: `--audit-only` → skip; `--apply <id>` → `apply_proposal(id)`; `--restore <id>` → `revert_change(id, "ui_user")`; `--auto` → §5.5. Interactive default: (1) Edit file. (2) Read back to verify. (3) Append to `data/improve_log.jsonl` with keys `{timestamp, pain_point, severity, file_changed, section, evidence, approved_by, summary}`. (4) Print `✓ Applied: <ID> → <file>`.
 
 ---
 
 ---
 
-## 5.5 `--auto` orchestration (autonomous mode)
+## 5.5 `--auto` orchestration (autonomous mode) *(archived: see .claude/_archive/improve__5-5-auto-orchestration-autonomous-mode.md; restore via /improve --restore COMPACT-2026-05-20-D)*
 
-Triggered automatically at the end of every `/fetchjobs` run when `auto_improve_enabled` is true (the default for pro users). The orchestrator is the /improve LLM itself; the script provides the data, the LLM does the dispatch. No human gate for cost-only changes — but every change is regression-checked on the next run and silently reverted if quality drops.
-
-**Sequence:**
-
-1. **Audit.** `uv run python scripts/audit_run_efficiency.py > /tmp/improve_audit.json`. If `audit_failed: true`, abort the cycle and print one line: `AUTO_ABORTED: audit_failed (<reason>)`. Do not apply or revert anything.
-
-2. **Self-heal (auto-revert).** Walk `auto_revert_candidates.regressions` from the audit. For each entry:
-   ```bash
-   uv run python -c "from job_finder import improve_changes; print(improve_changes.revert_change('<change_id>', reverted_by='auto_regression_guard'))"
-   ```
-   Capture (a) change_id, (b) regression_reasons (already human-readable, include the threshold), (c) revert result. If revert fails (e.g., source file no longer in expected state), log the failure but continue — do NOT halt the whole cycle.
-
-3. **Mark validated.** Walk `auto_revert_candidates.validated`. For each, append `{"change_id": "...", "validated_at": "<iso>"}` to a `validations` log so future audits don't re-check the same row. (Schema: extend `data/improve_changes.jsonl` rows by appending a new line with `{"change_id", "validated_at"}` keyed to the original.)
-
-4. **Walk compaction tiers.** For each Tier 1–4 candidate (§0.7), generate a proposal dict using the same shape as `--audit-only` (§4.1), then immediately apply:
-   ```bash
-   uv run python -c "from job_finder import improve_changes; print(improve_changes.apply_proposal('<change_id>', approved_by='auto', pre_metrics=<from audit.efficiency>))"
-   ```
-   - `pre_metrics` MUST be the JSON-serialized current `efficiency` block from the audit. This is what powers the next-run regression check.
-   - For Tier 3 (`archive_section`), the proposal's `archive_path` must resolve under `.claude/_archive/`; `apply_proposal` validates this and refuses otherwise.
-   - Track `total_bytes_reclaimed` += (source section bytes − stub bytes) for the summary.
-
-5. **Stage human-gated proposals.** PATTERN_*, SCORING_DRIFT_DETECTED, REGRESSION_DETECTED, COMPACTION_STAGNATION, LOW_APPLY_CONVERSION, LATENCY_CRITICAL_PATH, PRUNER_FPR_ALERT → call `write_proposal()` to stage to Streamlit; do NOT auto-apply.
-
-6. **Brief summary.** Print the Auto Summary block (§6 below). Keep it under 12 lines — the user reads it at the end of every /fetchjobs cycle.
-
-**Safety invariants the orchestrator must NOT violate:**
-
-- Never auto-apply a Tier 3 archive if the section's `n_fingerprints == 0` (unmeasurable — the absence of refs is meaningless).
-- Never auto-apply if `efficiency.valid_jobs == 0` for the current run (the run failed; don't compact based on a broken signal).
-- Never auto-apply more than 10 Tier 3 archives in a single cycle (cap per-run churn; if there are more candidates, the rest stage to Streamlit for batch review).
-- If `auto_revert_candidates.regressions` is non-empty, SKIP step 4 entirely for this cycle — first prove quality holds at current bytes before cutting further.
+Runs at end of every `/fetchjobs` when `auto_improve_enabled` is true. Sequence: (1) Audit → abort if `audit_failed`. (2) Auto-revert each `auto_revert_candidates.regressions` entry via `revert_change(id, "auto_regression_guard")`. (3) Mark validated rows. (4) Walk §0.7 Tiers 1–4 and `apply_proposal(id, approved_by="auto", pre_metrics=<audit.efficiency>)` — skip if regressions were found this cycle. (5) Stage PATTERN_*/SCORING_DRIFT_/REGRESSION_DETECTED/etc. to Streamlit via `write_proposal()`. (6) Print Auto Summary (§6). Safety: never archive `n_fingerprints==0` sections; never apply when `valid_jobs==0`; cap Tier-3 at 10 per cycle.
 
 ---
 

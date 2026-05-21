@@ -97,7 +97,7 @@ Then continue with the normal sequence below.
    - **Workday path (dedicated):** If `search_targets` includes `workday.com` or `myworkdayjobs.com`, run queries against **`site:myworkdayjobs.com`** (not `site:workday.com` — the latter rarely surfaces individual listings). Example: `site:myworkdayjobs.com "Applied Scientist" ("Bayesian" OR "Causal Inference") USA`. Also try `"[company] careers" "Applied Scientist" workday` for companies known to use Workday.
    - **LinkedIn (dedicated path):** If `search_targets` includes **`linkedin.com/jobs`**, run `site:linkedin.com/jobs` searches. **However:** LinkedIn via `site:` often returns stale aggregation pages rather than individual listings. Treat LinkedIn as a **discovery hint layer only** — extract company+title from any hits, then immediately run a secondary ATS backfill search (e.g. `"[company]" "[title]" site:lever.co OR site:greenhouse.io OR site:ashbyhq.com`) to find the direct ATS URL. Persist the ATS link, not the LinkedIn link, whenever possible.
    - **ATS backfill for LinkedIn hits:** If LinkedIn fetch is blocked/login-walled, do not stop: run company+title ATS search and continue. Keep LinkedIn URL only as a last resort when no ATS link is found.
-   - **Query building:** Combine (1) **golden_keywords** (roles + methods), (2) **scientific_moat** terms, (3) **engineering_stack** terms, (4) **priority_domains** so each query is specific. Use `target_country` and recency tokens ("2026", "Hiring Now") where appropriate. Run queries at two levels of specificity: a tight version (3+ keywords) and a relaxed version (2 keywords + domain) to avoid zero-result dead ends.
+   - **Query building:** Combine (1) **golden_keywords** (roles + methods), (2) **scientific_moat** terms, (3) **engineering_stack** terms, (4) **priority_domains** so each query is specific. Use `target_country` and recency tokens ("2026", "Hiring Now") where appropriate. Run queries at two levels of specificity: a tight version (3+ keywords) and a relaxed version (2 keywords + domain) to avoid zero-result dead ends. **Multi-site queries must use OR syntax:** `(site:lever.co OR site:greenhouse.io) "Applied Scientist"` — never `site:lever.co/greenhouse.io` (Google treats the slash as a URL path, not two sites, producing zero results).
    - **Discovery must be live (MCP web search):** For each query you construct, use `WebSearch` to retrieve current results and `WebFetch` for promising candidates. Do not guess or reuse a fixed shortlist. Deduplicate by `link`.
    - **Hard MCP requirement (no silent fallback):**
      - Minimum per run: at least **8 `WebSearch` calls** and at least **5 `WebFetch` calls** before concluding discovery.
@@ -108,6 +108,7 @@ Then continue with the normal sequence below.
        - `mcp_blocked_or_failed_calls`: <int>
      - If MCP calls were not made (or all failed), print: `MCP_DISCOVERY_FAILED` with reason and stop pretending discovery succeeded.
    - **Lever API path (use for ALL Lever jobs — never fetch `jobs.lever.co` directly):** `jobs.lever.co` returns 403 to all non-browser clients regardless of job status. Before any WebFetch of a Lever URL, convert it to the public JSON API endpoint: `https://jobs.lever.co/{company}/{jobId}` → `https://api.lever.co/v0/postings/{company}/{jobId}?mode=json`. This endpoint is unauthenticated, returns structured JSON containing `descriptionPlain`, `listsPlain`, and `createdAt` (epoch ms — the job's posting timestamp), and is used by all major aggregators without bot detection. Apply this conversion for **both description fetching (Wave 2) and link existence checks (Step 4)**. A live job returns a JSON object with a `text` field; a dead or missing job returns `{"code":"NotFound"}` or `{"code":"Gone"}` — use these as the dead-job signal. Only fall back to aggregator search (`site:builtin.com OR site:simplify.jobs`) if the API URL also returns NotFound/Gone or a connection error. **When the API returns `createdAt`, capture it on the job dict as `posted_at` (epoch ms is fine — `persistence._normalize_posted_at` converts to ISO automatically).**
+   - **Greenhouse pre-canonicalization:** Before fetching any `boards.greenhouse.io` URL, rewrite it to `job-boards.greenhouse.io` — the old subdomain 301-redirects every request, wasting a round-trip per Greenhouse URL.
 
    - **Posted-date extraction (best-effort, optional but valued):** For each candidate, attempt to capture an absolute posting timestamp into a `posted_at` field on the job dict. The persistence layer normalizes epoch ms / epoch seconds / ISO strings; non-parseable strings are stored verbatim, and missing values are stored as NULL — so do not fabricate. Sources by reliability:
      - **Lever API**: `createdAt` (epoch ms) — always reliable when the API call succeeds. Extract this every time.
@@ -119,12 +120,12 @@ Then continue with the normal sequence below.
 
      If you can't get a reliable absolute date, omit the field entirely. NULL is a fine and expected outcome — the recency view in Step 9 falls back to `first_seen` which is always populated.
    - **Ashby pages are JS-rendered:** `WebFetch` on `ashbyhq.com` job URLs typically returns CSS only. Run aggregator fallback: `"[company]" "[title]" site:builtin.com OR site:simplify.jobs OR site:levels.fyi`. Log fallbacks in the diagnostics block.
-   - **Verify individual listings, not board pages:** Before adding a candidate to your list, confirm the URL resolves to a single job posting (not a board index). Signal of a board page: URL contains `?department=`, `?location=`, or `?error=true`; body shows 100+ job titles; no company-specific description. If you land on a board, do not persist that URL — run a more specific search instead (e.g. add job ID or title to query).
+   - **Verify individual listings, not board pages:** Before adding a candidate to your list, confirm the URL resolves to a single job posting (not a board index). Board-page signals — URL level (check before fetching): URL path ends in `/jobs`, `/openings`, `/careers`, or `/positions` with no job-ID segment; or URL has only `?q=`, `?keyword=`, `?department=`, `?location=`, or `?error=true` query params; or final URL after redirect no longer contains the original job-ID path. Body level (check after fetching): page lists 10+ distinct job titles without a company-specific description block; or `filter_valid_job_links` detects a title-not-found miss. If you detect a board page at either level, drop it, do NOT persist that URL, and log it toward `board_page_hits` in diagnostics (count URLs dropped as board pages — not total candidates). Run a more specific search instead (e.g. add job ID or title to query).
    - Print a short LinkedIn summary before validation: `linkedin_discovered`, `linkedin_with_ats`, `linkedin_fallback_only`, `linkedin_dropped_reason_counts`.
 
 3. **Scientific Moat Evaluation (Moat-Seeker Logic):**
-   - **Score 90–100:** Job description **explicitly requires 3 or more** items from `scientific_moat`. Strong alignment with rare, high-barrier skills. Bonus if the role is in a `priority_domain`.
-   - **Score 70–89:** Matches `core_identity` and **at least 2** items from `engineering_stack`. Good fit but fewer moat signals.
+   - **Score 90–100:** Either (a) description **explicitly requires 3 or more** items from `scientific_moat`, OR (b) description explicitly requires **2 or more** items from `scientific_moat` AND the role is in a `priority_domain`. High confidence in both cases.
+   - **Score 70–89:** Matches `core_identity` and **at least 2** items from `engineering_stack` OR at least 1 item from `scientific_moat`. Good fit with fewer rare-skill signals.
    - **Penalty:** Deduct points for generic job descriptions that do not mention rigorous evaluation or specialized modeling.
    - **Hard filter:** Discard any role whose title or description matches **any** of `noise_keywords` (e.g. Junior, Intern, Web Developer, Front End, Marketing Analyst, Business Intelligence, Entry Level, Contract).
    - **Hard filter (exclusions):** BEFORE applying any scoring, drop any candidate matched by `excluded_companies`, `excluded_areas`, or `excluded_pairs` as described in Step 1. Log `excluded_dropped: <count>` and a 3-line sample in diagnostics. Do NOT generate rationales for excluded jobs (token preservation).
@@ -231,31 +232,15 @@ Then continue with the normal sequence below.
 
    ```python
    from job_finder.link_validation import (
-       compute_pruner_fpr_alert,
-       count_stale_links_quarantined,
-       count_stale_links_ttl_expired,
+       compute_pruner_fpr_alert, count_stale_links_quarantined, count_stale_links_ttl_expired,
    )
-
-   # Defaults — emitted unchanged if the underlying check did not run / data missing.
-   pruner_fpr_alert = False
-   stale_links_quarantined = 0
-   stale_links_ttl_expired = 0
-
-   try:
-       fpr_result = compute_pruner_fpr_alert()  # reads data/fpr_recheck_latest.json
-       pruner_fpr_alert = bool(fpr_result.get("pruner_fpr_alert", False))
-   except Exception as e:
-       print(f"diagnostics_warn: pruner_fpr_alert defaulted to false ({e!r})")
-
-   try:
-       stale_links_quarantined = int(count_stale_links_quarantined())
-   except Exception as e:
-       print(f"diagnostics_warn: stale_links_quarantined defaulted to 0 ({e!r})")
-
-   try:
-       stale_links_ttl_expired = int(count_stale_links_ttl_expired(ttl_days=60))
-   except Exception as e:
-       print(f"diagnostics_warn: stale_links_ttl_expired defaulted to 0 ({e!r})")
+   pruner_fpr_alert, stale_links_quarantined, stale_links_ttl_expired = False, 0, 0
+   try: pruner_fpr_alert = bool(compute_pruner_fpr_alert().get("pruner_fpr_alert", False))
+   except Exception as e: print(f"diagnostics_warn: pruner_fpr_alert ({e!r})")
+   try: stale_links_quarantined = int(count_stale_links_quarantined())
+   except Exception as e: print(f"diagnostics_warn: stale_links_quarantined ({e!r})")
+   try: stale_links_ttl_expired = int(count_stale_links_ttl_expired(ttl_days=60))
+   except Exception as e: print(f"diagnostics_warn: stale_links_ttl_expired ({e!r})")
    ```
 
    Use these three local variables verbatim when assembling the diagnostics dict below — the field names in the JSON MUST be exactly `pruner_fpr_alert`, `stale_links_quarantined`, `stale_links_ttl_expired`.
