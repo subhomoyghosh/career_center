@@ -11,7 +11,7 @@ __pycache__/
 
 # Personal / generated data (recipient runs orchestrator and adds their own)
 data/*.pdf
-data/sovereign_agent.db
+data/*.db
 data/candidate_info.json
 data/history/
 data/run_diagnostics.jsonl
