@@ -82,16 +82,23 @@ Then continue with the normal sequence below.
    - **Exclusion lists (hard filter, applied BEFORE scoring/rationale):** Apply the three `excluded_*` lists in Step 3 (BEFORE the moat scoring loop) and again in the handoff to the Persistence Agent in Step 4. Drop logic: (a) `company` (case-insensitive exact) is in `excluded_companies`, OR (b) any entry in `excluded_areas` is a case-insensitive substring of `theme`, OR (c) any `company:area` in `excluded_pairs` matches both sides (split on FIRST colon; empty-after-strip entries are silently ignored). Precedence: `excluded_*` ALWAYS wins over `peer_companies` — do not include excluded companies in peer-companies organic search queries.
    - **Pattern fields** (`inclinations` / `disinclinations` / `learn_skills`) come from the LLM-driven synthesizer in `/improve` after human approval. Each entry has `{pattern | skill, evidence_job_ids | source_jobs, confidence: HIGH|MED|LOW, source_axis, added_at}`. Use them in scoring (Step 3) — NEVER as hard filters.
    - **User feedback & weights (nudge):** Run `uv run python scripts/get_nudge_context.py` and use its JSON output (or call `get_high_signal_jobs()` from `job_finder.persistence`). Use the listed jobs as **positive signals**: bias search queries and scoring toward similar roles (company, title, theme, rationale); mention these patterns in the wisdom synthesis. Apply stronger nudge for higher `user_weight` (e.g. 100 = very strong signal).
+   - **Nudge amplification (mandatory when high_signal_jobs is non-empty):** For each job with `user_weight ≥ 70`, extract its `theme` sector and add **at least one dedicated Wave 1 query** targeting that sector: e.g., if "Demand Forecasting & Pricing Science" is high-signal, add `"pricing science" "data scientist" site:lever.co OR site:job-boards.greenhouse.io`. This ensures the nudge directly shapes discovery, not just scoring. Log `nudge_amplified_queries: <count>` in the status block.
    - Parse the resume PDF: list `data/` (e.g. `ls data/`) and pick any `.pdf` whose filename contains "resume" (case-insensitive). Use that file to extract Top 3 Achievements and enrich rationale (no hard-coded company names). (PDFs may be gitignored — do not rely on glob alone.)
    - **`peer_companies` organic search:** If `peer_companies` is non-empty, run additional discovery queries such as `"[peer] competitor" "Applied Scientist" site:lever.co` or `"people also hired from [peer]" "Data Scientist"` to find adjacent companies hiring from similar talent pools. If `peer_companies` is empty, suggest the user populate it with 2–3 prior employers or known peer companies so future runs can exploit this signal.
 
 2. **Vectorized Search (Active Roles Only) — use every field** *(Discovery Team — fire in 3 waves, each wave is one parallel message)*:
 
+   **Before Wave 1 — Zero-result avoidance (1 Bash call):** Load the last 2 runs' `zero_result_query_strings` from `data/run_diagnostics.jsonl`:
+   ```bash
+   uv run python -c "import json,pathlib; lines=[json.loads(l) for l in pathlib.Path('data/run_diagnostics.jsonl').read_text().splitlines() if l.strip() and 'zero_result_query_strings' in l]; recent=[q for r in lines[-2:] for q in r.get('zero_result_query_strings',[])]; print(json.dumps(recent))"
+   ```
+   For any Wave 1 query you planned that is lexically identical to a recent zero-result query, **replace it with a broader fallback** (drop one domain-specific term, or widen to 2-keyword + target_country). Log `zero_result_avoided: <count>` in diagnostics. Do not skip the query entirely — broaden it.
+
    **Wave 1 — Search Wave:** Fire all primary `WebSearch` queries simultaneously in a single message (target 8–10 calls). Build queries per the rules below, then dispatch all at once.
 
    **Wave 2 — Fetch Wave:** After Wave 1 returns, fire all `WebFetch` calls for promising candidates simultaneously in a single message (target 6–8 calls). Includes aggregator fallback fetches for JS-rendered ATS pages.
 
-   **Wave 3 — Backfill Wave:** After Wave 2 returns, fire any remaining secondary `WebSearch` queries (ATS backfill for LinkedIn, aggregator searches for 403 Lever/Ashby pages) + any follow-up `WebFetch` calls simultaneously in a single message.
+   **Wave 3 — Backfill Wave:** After Wave 2 returns, fire any remaining secondary `WebSearch` queries (ATS backfill for LinkedIn, aggregator searches for 403 Lever/Ashby pages) + any follow-up `WebFetch` calls simultaneously in a single message. **Include domain blind spot recovery:** tally which `priority_domains` have 0 discovered candidates after Wave 2. For each zero-coverage domain, add one broad targeted query to this wave: `"Data Scientist" OR "Applied Scientist" "[domain keyword]" site:lever.co OR site:job-boards.greenhouse.io` (e.g. "autonomous systems", "renewable energy", "climate"). Log `blind_spot_recovery_queries: [<domain>, ...]`.
 
    - **Site targets:** If `search_targets` is present, run **one or more queries per target** using `site:[domain]`. Always include both `jobs.lever.co` and `lever.co`, and both `job-boards.greenhouse.io` and `boards.greenhouse.io` if either appears in `search_targets`.
    - **Workday path (dedicated):** If `search_targets` includes `workday.com` or `myworkdayjobs.com`, run queries against **`site:myworkdayjobs.com`** (not `site:workday.com` — the latter rarely surfaces individual listings). Example: `site:myworkdayjobs.com "Applied Scientist" ("Bayesian" OR "Causal Inference") USA`. Also try `"[company] careers" "Applied Scientist" workday` for companies known to use Workday.
@@ -391,16 +398,13 @@ Then continue with the normal sequence below.
 
 ### 10. Auto-audit /improve (optional)
 
-Read `auto_improve_audit_enabled` from `data/candidate_info.json` (default: false if absent).
+Read `auto_improve_enabled` and `auto_improve_audit_enabled` from `data/candidate_info.json`.
 
-- If **true**: dispatch `/improve --audit-only`. On completion, print one line:
-  `/improve audit: <N> proposal(s) staged — review in Streamlit → Analytics → Pending Improvements.`
-- If **false**: print one line:
-  `/improve auto-audit disabled. Toggle in sidebar to enable, or run /improve manually.`
-- If the key is **absent** (first /fetchjobs after this feature shipped): treat as false and print:
-  `/improve auto-audit is off by default. Enable in Streamlit → sidebar → "Auto-improve audit after /fetchjobs".`
+- If `auto_improve_enabled` is **true**: dispatch `/improve --auto`. This applies Tier 1–4 compaction automatically (with regression safety net) and stages PATTERN_*/SCORING_DRIFT_ proposals for human review. Print: `/improve --auto: applied, staged — see Streamlit → Analytics.`
+- Else if `auto_improve_audit_enabled` is **true**: dispatch `/improve --audit-only`. Print: `/improve audit: <N> proposal(s) staged — review in Streamlit → Analytics → Pending Improvements.`
+- If both are false/absent: print: `/improve disabled. Set auto_improve_enabled: true in candidate_info.json to auto-compact each run.`
 
-**Hard rule:** auto-audit never applies a change. All approvals stay user-gated in the Streamlit UI's Pending Improvements table.
+**Safety:** `--auto` never touches PATTERN_* or SCORING_DRIFT_ proposals — those still require human approval in Streamlit. Tier 1–4 compaction auto-applies and auto-reverts on regression.
 
 ---
 

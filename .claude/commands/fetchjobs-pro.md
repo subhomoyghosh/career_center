@@ -67,6 +67,12 @@ See `.claude/commands/fetchjobs.md` Step 1 for the full rules — they apply ver
 
 ## Step 2 — Discovery (3 waves, with description externalization)
 
+### Before Wave 1 — Zero-result avoidance (1 Bash call)
+
+Load the last 2 runs' `zero_result_query_strings` from `data/run_diagnostics.jsonl` (same snippet as Max Step 2). For any planned Wave 1 query that is lexically identical to a recent zero-result query, replace it with a broader fallback (drop one domain-specific term, or widen site target). Log `zero_result_avoided: <count>`.
+
+Also apply **nudge amplification**: for each job in `high_signal_jobs` with `user_weight ≥ 70`, add at least one dedicated Wave 1 query targeting that role's sector (e.g. `"pricing science" "data scientist" site:lever.co OR site:job-boards.greenhouse.io`). Log `nudge_amplified_queries: <count>`.
+
 ### Wave 1 — Search (single parallel message, 8–10 WebSearch calls)
 
 Build queries per `fetchjobs.md` Step 2's query-building rules (site-targets, golden_keywords ∩ scientific_moat ∩ engineering_stack ∩ priority_domains, recency tokens, target_country, peer_companies organic search). Fire all in one message.
@@ -97,6 +103,8 @@ For each promising candidate from Wave 1:
 ### Wave 3 — Backfill *(archived: see .claude/_archive/fetchjobs-pro__wave-3-backfill.md; restore via /improve --restore COMPACT-2026-05-20-E)*
 
 Single parallel message: ATS backfill for LinkedIn hits + aggregator fallback for Ashby/Workday CSS-empty candidates + direct WebFetch of new ATS URLs. Externalize each fetched description as in Wave 2; append with `source_wave: 3`.
+
+**Domain blind spot recovery:** after Wave 2, tally which `priority_domains` have 0 discovered candidates. For each zero-coverage domain, add one broad recovery query to this wave: `"Data Scientist" OR "Applied Scientist" "[domain keyword]" site:lever.co OR site:job-boards.greenhouse.io`. Log `blind_spot_recovery_queries: [<domain>, ...]`.
 
 ### Hard MCP discovery requirements (must print before scoring)
 
@@ -282,9 +290,9 @@ Identical to Max Step 9.f — run the audit and patch the just-written diagnosti
 
 ---
 
-## Step 9 — Auto-audit /improve (Step 10 from Max)
+## Step 9 — Auto-improve (Step 10 from Max)
 
-Identical to Max Step 10 — read `auto_improve_audit_enabled` from `candidate_info.json` and either dispatch `/improve --audit-only` or print the disabled-by-default notice.
+Identical to Max Step 10 — read `auto_improve_enabled` and `auto_improve_audit_enabled` from `candidate_info.json`. If `auto_improve_enabled` is true, dispatch `/improve --auto` (applies Tier 1–4 compaction, stages PATTERN_*/SCORING_DRIFT_ for human review). Else if `auto_improve_audit_enabled` is true, dispatch `/improve --audit-only`. Otherwise print the disabled notice.
 
 ---
 
