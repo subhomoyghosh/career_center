@@ -6,22 +6,28 @@ Self-sufficient job-search orchestrator. Autonomous agent discovers, scores, and
 
 ## Quick start
 
-**First time?** See [How to Run](./HOW_TO_RUN.md) for the 5-minute walkthrough.  
+**First time?** See [Walkthrough](./WALKTHROUGH.md) for the conceptual overview, then [How to Run](./HOW_TO_RUN.md) for step-by-step commands.  
 **Already set up?** `uv run streamlit run app.py` then `/fetchjobs` in chat.
+
+---
+
+## Resources
+
+**Listen:** [Career Command Center Overview](./assets/command_center_voice_over.mp3) — Audio overview of the system (2 min)
 
 ---
 
 ## Table of Contents
 
-- [Dashboard](#dashboard)
-- [Fetch variants: Lean vs Full](#fetch-variants-lean-vs-full)
-- [Self-tuning: the /improve loop](#self-tuning-the-improve-loop)
-- [Under the hood](#under-the-hood)
-- [Troubleshooting](#troubleshooting)
+- [📊 Dashboard](#dashboard)
+- [⚖️ Fetch variants: Lean vs Full](#fetch-variants-lean-vs-full)
+- [⚙️ Self-tuning: the /improve loop](#self-tuning-the-improve-loop)
+- [🏗️ Under the hood](#under-the-hood)
+- [🛠️ Troubleshooting](#troubleshooting)
 
 ---
 
-## Dashboard
+## 📊 Dashboard
 
 Run `uv run streamlit run app.py` to see your jobs board, feedback history, and pending improvements.
 
@@ -55,7 +61,7 @@ Three pages + sidebar on every page:
 
 ---
 
-## Fetch variants: Lean vs Full
+## ⚖️ Fetch variants: Lean vs Full
 
 `/fetchjobs` dispatches based on your plan tier. Both variants share the same DB schema, persistence agent, and diagnostics.
 
@@ -68,7 +74,9 @@ Three pages + sidebar on every page:
 
 ### Trade-off: description context vs. token cost
 
-Full keeps descriptions in-context during scoring, enabling richer pattern matching. Lean externalizes them to disk, runs scoring in a background subagent, and gives the main agent only a top-3 summary. **Either way, you get the same final jobs list and the same applied feedback on the next run.** Pro users will want Lean by default; if you're on Max and want to spend the tokens, Full gives more nuance.
+Full keeps descriptions in-context during scoring, enabling richer pattern matching. Lean externalizes them to disk, runs scoring in a background subagent, and gives the main agent only a top-3 summary.
+
+> **Why this matters:** Either way, you get the same final jobs list and the same applied feedback on the next run. Pro users will want Lean by default; if you're on Max and want to spend the tokens, Full gives more nuance.
 
 #### Skipping the prompt
 
@@ -90,22 +98,22 @@ See `src/job_finder/link_validation.py` for the full logic. The agent can also i
 
 ---
 
-## Self-tuning: the /improve loop
+## ⚙️ Self-tuning: the /improve loop
 
 `/improve` is the meta-skill that closes the loop. Run it after `/fetchjobs` to audit cost, detect pain points, and apply fixes automatically.
 
 ### Why this matters
 
-A pro-user contract: you run heavy, the system compresses cost without losing signal. Auto-reverting regressions means you never pay for a change that made things worse. Auto-applying low-risk compaction (hedge cleanup, example externalization, cold-section archive) means your agent-files stay lean. **Pain-point proposals still require human approval** — those change behavior, not just cost, so they stage to Streamlit for review.
+> **Pro-user contract:** You run heavy, the system compresses cost without losing signal. Auto-reverting regressions means you never pay for a change that made things worse. Auto-applying low-risk compaction means your agent-files stay lean. **Pain-point proposals still require human approval** — those change behavior, not just cost, so they stage to Streamlit for review.
 
 ### Four modes
 
 | Mode | Trigger | Summary |
 | --- | --- | --- |
-| `--auto` | Auto-dispatched at end of `/fetchjobs` when `auto_improve_enabled: true` (default for pro users) | Self-heal regressions, auto-apply Tier 1–4 compaction, stage human-gated proposals |
-| `--audit-only` | Set `auto_improve_audit_enabled: true` instead | Stage all proposals to Streamlit for review (no auto-apply) |
-| `--apply <change_id>` | Streamlit "Apply approved" button | Apply a single staged proposal; commit if tracked, inverse-op if not |
-| Manual `/improve` | Type `/improve` in chat | Interactive walkthrough with full evidence for each proposal |
+| ✓ `--auto` | Auto-dispatched at end of `/fetchjobs` when `auto_improve_enabled: true` (default for pro users) | Self-heal regressions, auto-apply Tier 1–4 compaction, stage human-gated proposals |
+| 👁️ `--audit-only` | Set `auto_improve_audit_enabled: true` instead | Stage all proposals to Streamlit for review (no auto-apply) |
+| → `--apply <change_id>` | Streamlit "Apply approved" button | Apply a single staged proposal; commit if tracked, inverse-op if not |
+| ⟳ Manual `/improve` | Type `/improve` in chat | Interactive walkthrough with full evidence for each proposal |
 
 #### `--auto` workflow (default for pro users)
 
@@ -125,7 +133,7 @@ Runs three steps automatically:
 | **3** Cold-section archive | Sections whose backtick fingerprints haven't appeared recently move to archive; stub replaces them | Yes (restorable via `--restore`) | When skill file activity is uneven |
 | **4** Cross-file dedup | Cursor `.mdc` / `SKILL.md` mirroring `.claude/commands/*.md` collapses to a pointer | Yes (canonical content reachable) | When duplication detected |
 
-Pain-point proposals (e.g., `SEARCH_TOO_NARROW`, `SCORING_TOO_STRICT`, `DOMAIN_BLIND_SPOT`) activate when `n_priors_used ≥ 1`, with graduated severity (LOW → MEDIUM → HIGH). These are NOT auto-applied and require explicit review.
+> **Note:** Pain-point proposals (e.g., `SEARCH_TOO_NARROW`, `SCORING_TOO_STRICT`, `DOMAIN_BLIND_SPOT`) activate when `n_priors_used ≥ 1`, with graduated severity (LOW → MEDIUM → HIGH). These are NOT auto-applied and require explicit review.
 
 ### The audit pipeline
 
@@ -145,7 +153,7 @@ This data powers the proposal generation and regression watchlist.
 
 ---
 
-## Under the hood
+## 🏗️ Under the hood
 
 ### Architecture
 
@@ -239,7 +247,7 @@ The system learns from your feedback loop:
 
 ---
 
-## Troubleshooting
+## 🛠️ Troubleshooting
 
 ### "VIRTUAL_ENV doesn't match"
 
