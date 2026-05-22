@@ -27,11 +27,23 @@ Run `uv run streamlit run app.py` to see your jobs board, feedback history, and 
 
 Three pages + sidebar on every page:
 
-| Page | What you get |
-| --- | --- |
-| **Home** | Left column: Your candidate profile + market intelligence · Right column: Jobs table (filterable by domain, source) · Edit per row: Status, feedback, weight · Save: Click button to persist changes |
-| **Analytics** | Token usage per run (Input/Output/Cache/Productive/Lost) · Pending improvements (staged proposals awaiting approval) · Applied change history (with revert buttons) |
-| **Historical Runs** | Last 5 searches side-by-side · Job count, tokens used, domain breakdown per run |
+### Home
+
+- Left column: Your candidate profile + market intelligence
+- Right column: Jobs table (filterable by domain, source)
+- Edit per row: Status, feedback, weight
+- Save: Click button to persist changes
+
+### Analytics
+
+- Token usage per run (Input/Output/Cache/Productive/Lost)
+- Pending improvements (staged proposals awaiting approval)
+- Applied change history (with revert buttons)
+
+### Historical Runs
+
+- Last 5 searches side-by-side
+- Job count, tokens used, domain breakdown per run
 
 **Sidebar (on all pages):**
 
