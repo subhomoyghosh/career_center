@@ -32,3 +32,4 @@ data/fpr_recheck_latest.json
 # Runtime caches (recomputed on demand)
 data/skill_analysis_cache.json
 data/cold_sections_cache.json
+src/job_finder.egg-info/
