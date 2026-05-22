@@ -28,3 +28,7 @@ data/_descriptions/
 data/_fetchjobs_candidates.json
 data/_fetchjobs_scored.json
 data/fpr_recheck_latest.json
+
+# Runtime caches (recomputed on demand)
+data/skill_analysis_cache.json
+data/cold_sections_cache.json
