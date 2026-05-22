@@ -51,6 +51,12 @@ LAST_SESSION_PATH = PROJECT_ROOT / "data" / "last_session.json"
 PRUNED_HISTORY_PATH = PROJECT_ROOT / "data" / "pruned_history.jsonl"
 RUN_DIAGNOSTICS_PATH = PROJECT_ROOT / "data" / "run_diagnostics.jsonl"
 SKILL_SECTION_USAGE_PATH = PROJECT_ROOT / "data" / "skill_section_usage.jsonl"
+COLD_SECTIONS_CACHE_PATH = PROJECT_ROOT / "data" / "cold_sections_cache.json"
+
+# Cap how many lines we read from growing JSONL files before slicing to the
+# requested window. Prevents unbounded memory growth as history accumulates.
+_MAX_DIAGNOSTIC_LINES = 50
+_MAX_SECTION_USAGE_LINES = 10
 
 # Window (days) over which an applied compaction is auto-revert eligible. After
 # this many days, /improve treats it as "settled" and stops watching for regression.
@@ -242,7 +248,9 @@ def _load_recent_diagnostics(n: int) -> list[dict]:
         return []
     out = []
     try:
-        for line in RUN_DIAGNOSTICS_PATH.read_text().splitlines():
+        lines = RUN_DIAGNOSTICS_PATH.read_text().splitlines()
+        # Cap how many lines we parse to bound memory as the file grows.
+        for line in lines[-_MAX_DIAGNOSTIC_LINES:]:
             line = line.strip()
             if not line:
                 continue
@@ -1075,7 +1083,9 @@ def _load_section_usage_history(window: int) -> list[dict]:
         return []
     out = []
     try:
-        for line in SKILL_SECTION_USAGE_PATH.read_text().splitlines():
+        lines = SKILL_SECTION_USAGE_PATH.read_text().splitlines()
+        # Cap how many lines we parse to bound memory as the file grows.
+        for line in lines[-_MAX_SECTION_USAGE_LINES:]:
             line = line.strip()
             if not line:
                 continue
@@ -1086,6 +1096,16 @@ def _load_section_usage_history(window: int) -> list[dict]:
     except Exception:
         return []
     return out[-window:]
+
+
+def _count_jsonl_lines(path: Path) -> int:
+    """Count non-empty lines in a JSONL file without loading all content."""
+    if not path.exists():
+        return 0
+    try:
+        return sum(1 for ln in path.read_text().splitlines() if ln.strip())
+    except Exception:
+        return 0
 
 
 def compute_cold_sections(window: int = SKILL_SECTION_USAGE_WINDOW) -> dict:
@@ -1099,7 +1119,24 @@ def compute_cold_sections(window: int = SKILL_SECTION_USAGE_WINDOW) -> dict:
       - n_fingerprints >= SKILL_SECTION_MIN_FINGERPRINTS
       - total_refs <= SKILL_SECTION_WARM_THRESHOLD_REFS (a section referenced
         more than once across the window is warm, not cold)
+
+    Result is cached in data/cold_sections_cache.json keyed by the current line
+    count of skill_section_usage.jsonl. If no new /fetchjobs run has appended to
+    that file since the last compute, return the cached result immediately.
     """
+    current_line_count = _count_jsonl_lines(SKILL_SECTION_USAGE_PATH)
+    try:
+        if COLD_SECTIONS_CACHE_PATH.exists():
+            cached = json.loads(COLD_SECTIONS_CACHE_PATH.read_text())
+            if (
+                isinstance(cached, dict)
+                and cached.get("skill_section_usage_line_count") == current_line_count
+                and "result" in cached
+            ):
+                return cached["result"]
+    except Exception:
+        pass  # corrupt cache → recompute
+
     rows = _load_section_usage_history(window)
     if len(rows) < window:
         return {
@@ -1170,7 +1207,7 @@ def compute_cold_sections(window: int = SKILL_SECTION_USAGE_WINDOW) -> dict:
     candidates.sort(key=lambda c: -c["bytes"])
 
     total_bytes_savings = sum(c["bytes"] for c in candidates)
-    return {
+    result = {
         "n_runs_seen": len(rows),
         "window": window,
         "candidates": candidates,
@@ -1183,6 +1220,20 @@ def compute_cold_sections(window: int = SKILL_SECTION_USAGE_WINDOW) -> dict:
             "human review still required before deletion."
         ),
     }
+    # Persist so the next /improve call can skip recomputation if no new /fetchjobs ran.
+    try:
+        tmp = str(COLD_SECTIONS_CACHE_PATH) + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump({
+                "skill_section_usage_line_count": current_line_count,
+                "computed_at": datetime.now(timezone.utc).isoformat(),
+                "result": result,
+            }, f, indent=2)
+        import os
+        os.replace(tmp, COLD_SECTIONS_CACHE_PATH)
+    except Exception:
+        pass  # cache write failure is non-fatal
+    return result
 
 
 # ----------------------------------------------------------------------------

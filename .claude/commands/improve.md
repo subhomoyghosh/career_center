@@ -47,6 +47,38 @@ Default behavior every `/improve` cycle (see constitutional rule at line 5). The
 
 ---
 
+## 0.9. Skill file cache check (Phase 0)
+
+Before reading any skill or command files, run a single cache check:
+
+```bash
+uv run python scripts/skill_cache.py check \
+  .claude/commands/setup.md \
+  .claude/commands/fetchjobs.md \
+  .claude/commands/fetchjobs-pro.md \
+  .claude/commands/improve.md \
+  .claude/_scoring_rules.md \
+  .cursor/skills/validate-job-links/SKILL.md \
+  .cursor/skills/leverage-feedback-and-weights/SKILL.md \
+  .cursor/skills/evaluate-nudge-and-wisdom/SKILL.md \
+  .cursor/skills/discover-linkedin-jobs/SKILL.md \
+  .cursor/skills/godmode-improve/SKILL.md \
+  .cursor/rules/jobsearch.mdc \
+  .cursor/rules/setup_from_resume.mdc
+```
+
+Parse output JSON:
+- **`cache_hits`** `{rel_path: entry}` — SHA256 matches. **DO NOT read these files.** Inject each hit as:
+  `CACHED (unchanged): <entry.summary> | sections:<len(sections)> | tier1:<tier1_candidates_count> | tier2:<tier2_candidates_count> | tier3:<tier3_candidates_count> | tokens:~<token_count_approx>`
+  This is sufficient for pain-point detection, compaction-tier analysis, and cross-tool similarity checks.
+- **`cache_misses`** `[rel_path]` — not cached or file changed. Read full content as specified in §1 below.
+
+**Escape hatch:** if a specific pain point requires verbatim text of a cached file (e.g. `SKILL_TOKEN_BLOAT` CURRENT: block), read it anyway and log `cache_override: <path>`. The §1.75 update step will refresh its cache entry.
+
+**Guard:** if `scripts/skill_cache.py` does not exist, skip this section silently — treat all files as cache misses.
+
+---
+
 ## 1. Ingest evidence
 
 ```bash
@@ -71,14 +103,20 @@ print(json.dumps(entries[-20:], indent=2))
 "
 ```
 
-Read current text of all skill/command files:
+Read current text of all **cache-miss** skill/command files (from §0.9 above). Skip any file that was a cache hit unless you used the escape hatch:
 
-- `.claude/commands/setup.md`, `.claude/commands/fetchjobs.md`
-- `.cursor/skills/validate-job-links/SKILL.md`, `.cursor/skills/leverage-feedback-and-weights/SKILL.md`
-- `.cursor/skills/evaluate-nudge-and-wisdom/SKILL.md`, `.cursor/skills/discover-linkedin-jobs/SKILL.md`
-- `.cursor/rules/jobsearch.mdc`, `.cursor/rules/setup_from_resume.mdc`
-- `data/candidate_info.json`
-- `.claude/commands/improve.md`, `.cursor/skills/godmode-improve/SKILL.md` (self-audit)
+- `.claude/commands/setup.md` — if cache miss
+- `.claude/commands/fetchjobs.md` — if cache miss
+- `.claude/commands/fetchjobs-pro.md` — if cache miss
+- `.claude/_scoring_rules.md` — if cache miss
+- `.cursor/skills/validate-job-links/SKILL.md` — if cache miss
+- `.cursor/skills/leverage-feedback-and-weights/SKILL.md` — if cache miss
+- `.cursor/skills/evaluate-nudge-and-wisdom/SKILL.md` — if cache miss
+- `.cursor/skills/discover-linkedin-jobs/SKILL.md` — if cache miss
+- `.cursor/rules/jobsearch.mdc` — if cache miss
+- `.cursor/rules/setup_from_resume.mdc` — if cache miss
+- `data/candidate_info.json` — always read (small, changes between runs)
+- `.claude/commands/improve.md`, `.cursor/skills/godmode-improve/SKILL.md` (self-audit) — if cache miss
 
 If **zero diagnostic runs** exist: print `NO_DIAGNOSTICS_YET` and stop.
 
@@ -123,6 +161,41 @@ If both sets are insufficient (typical for cold-start), the synthesizer emits `s
 **Efficacy report (`/tmp/efficacy.json`):** Computes positive_followup_rate, negative_followup_avoidance_rate, and the user_reaction_matrix from `data/history/jobs_history.db` snapshots. The matrix counts `CORRECT_HIGH`, `MISCALIBRATED_HIGH`, `MISSED_HIGH`, `NO_SIGNAL` PLUS lifecycle buckets `APPLIED_OPEN`, `APPLIED_CLOSED`, `APPLIED_WON`, `EXPLICIT_NOTFORME`. **Critical disentanglement:** rows whose status is in {Applied,InProgress,Closed,Won,NotForMe} are short-circuited into the lifecycle buckets BEFORE scoring-drift logic runs — a high-scored Closed row is NOT MISCALIBRATED_HIGH (system was right to surface; outcome was external). Only `MISCALIBRATED_HIGH > 1` drives `SCORING_DRIFT_DETECTED`. `APPLIED_CLOSED` is informational (life-event), surfaced via `LOW_APPLY_CONVERSION` below. **These metrics are observability only — never auto-tune against them** (the script's `_observability_note` field warns of the reward-hacking risk).
 
 If snapshot DB has < 2 entries, efficacy report emits `audit_failed: true` and you skip the FEEDBACK_EFFICACY pain-points.
+
+---
+
+## 1.75. Cache update (after Phase 1 analysis)
+
+After completing Phase 1 analysis on all cache-miss files, write the results back so the next run can skip re-reading them.
+
+For each file that was a cache miss (or a cache_override), construct an entry and call:
+
+```bash
+uv run python scripts/skill_cache.py update '<json>'
+```
+
+Where `<json>` is a single JSON object `{rel_path: entry}` covering ALL analyzed files this run. Shape of each entry:
+
+```json
+{
+  "<rel_path>": {
+    "sha256": "<64-char hex — run: python -c \"import hashlib; print(hashlib.sha256(open('<path>','rb').read()).hexdigest())\" >",
+    "size_bytes": <int>,
+    "analyzed_at": "<ISO-8601 UTC>",
+    "token_count_approx": <int — estimate: size_bytes // 4>,
+    "sections": [{"heading": "<heading>", "level": <1–4>, "approx_tokens": <int>, "is_cold": <bool>}],
+    "tier1_candidates_count": <int>,
+    "tier2_candidates_count": <int>,
+    "tier3_candidates_count": <int — from audit cold_sections for this file, or 0>,
+    "pain_points_seen": ["SKILL_TOKEN_BLOAT", ...],
+    "summary": "<1–2 sentence synthesis: what this file does + current compaction state + key observations from this run>"
+  }
+}
+```
+
+The `summary` is LLM-generated from your Phase 1 reading — this is the synthesized knowledge that replaces re-reading the file on the next run. Make it specific enough to drive pain-point detection without the full text.
+
+**Guard:** if `scripts/skill_cache.py` does not exist, skip this step.
 
 ---
 

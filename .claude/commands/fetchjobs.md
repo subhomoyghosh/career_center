@@ -131,24 +131,15 @@ Then continue with the normal sequence below.
    - Print a short LinkedIn summary before validation: `linkedin_discovered`, `linkedin_with_ats`, `linkedin_fallback_only`, `linkedin_dropped_reason_counts`.
 
 3. **Scientific Moat Evaluation (Moat-Seeker Logic):**
-   - **Score 90–100:** Either (a) description **explicitly requires 3 or more** items from `scientific_moat`, OR (b) description explicitly requires **2 or more** items from `scientific_moat` AND the role is in a `priority_domain`. High confidence in both cases.
-   - **Score 70–89:** Matches `core_identity` and **at least 2** items from `engineering_stack` OR at least 1 item from `scientific_moat`. Good fit with fewer rare-skill signals.
-   - **Penalty:** Deduct points for generic job descriptions that do not mention rigorous evaluation or specialized modeling.
-   - **Hard filter:** Discard any role whose title or description matches **any** of `noise_keywords` (e.g. Junior, Intern, Web Developer, Front End, Marketing Analyst, Business Intelligence, Entry Level, Contract).
-   - **Hard filter (exclusions):** BEFORE applying any scoring, drop any candidate matched by `excluded_companies`, `excluded_areas`, or `excluded_pairs` as described in Step 1. Log `excluded_dropped: <count>` and a 3-line sample in diagnostics. Do NOT generate rationales for excluded jobs (token preservation).
-   - **Learned-pattern soft bias** (from approved synthesizer output — NEVER a hard filter, discovery non-degradation rule):
-     - For each entry in `inclinations`: if the job's description or rationale contains the `pattern` as substring (case-insensitive), apply `+5` per match (cap aggregate inclination bonus at `+15`).
-     - For each entry in `disinclinations`: same substring rule, apply `-5` per match (cap aggregate disinclination penalty at `-15`).
-     - For each entry in `learn_skills`: if the `skill` appears in description AND NOT in candidate's `engineering_stack`, apply `+3` (signals genuine growth opportunity — cap at `+9`).
-     - Scale all of the above by confidence: `HIGH = ×1.0`, `MED = ×0.7`, `LOW = ×0.4`.
-     - Note in `RATIONALE` which patterns matched (e.g. `+10 inclinations: Series-B clean energy, probabilistic forecasting`). This keeps the soft bias auditable.
-   - **Lifecycle-status dedup** (run BEFORE writing a candidate to the scored list):
-     - Query the live DB once for `{link: status}` of all rows whose `status IN ('Applied','InProgress','Closed','Won','NotForMe')`. These are "terminal" rows from the user's perspective — they already acted on them.
-     - If a freshly discovered candidate's `link` is already in that set, **DROP it from this run's surfacing list** (it would only be re-noise). Persist nothing; do not score it. Log `dropped_terminal_status: {link, prior_status}` in diagnostics.
-     - **CRITICAL**: do NOT confuse this with synthesizer disinclination filtering — `Closed` is genre-POSITIVE (user applied, didn't go through, still wants similar). The dedup only avoids re-surfacing the EXACT row; it does NOT remove the row's positive contribution to the soft-bias scoring above (the synthesizer already extracted patterns from it).
-   - **Vesting & Funding:** Bonus 1.2× for "Series C/D," "IPO-bound," "NIST Grant," "DOE funding." Negative signal for generic "Agency" or "Consultancy" unless explicitly PhD/scientific.
-   - **Scoring confidence:** If job description text was unavailable (Lever/Ashby CSS fallback) and no aggregator text was found, cap score at 79 and note `description_not_fetched: true` in rationale.
-   - **Requirement:** The `RATIONALE` must explain **how the candidate's `scientific_moat` solves a specific problem mentioned in the job description.**
+
+   **Read `.claude/_scoring_rules.md` for the full scoring rules before scoring.** That file is the canonical source. Summary of what it specifies:
+   - Hard filters (§1): noise_keywords, excluded_companies, excluded_areas, excluded_pairs — drop before scoring, log `excluded_dropped`
+   - Score bands (§2): 90–100 = ≥3 scientific_moat items; 70–89 = core_identity + ≥2 engineering_stack or ≥1 scientific_moat
+   - Soft-bias patterns (§3): inclinations +5, disinclinations -5, learn_skills +3; scaled by confidence; never hard filters
+   - Lifecycle dedup (§4): drop links already in terminal statuses (Applied/InProgress/Closed/Won/NotForMe)
+   - Vesting bonus (§5): 1.2× for Series C/D, IPO-bound, NIST/DOE grants
+   - Confidence cap (§6): cap at 79 if description unavailable
+   - Rationale contract (§7): cite JD phrases verbatim, explain moat→problem fit, note soft-bias matches
 
 4. **Scoring Handoff** *(main agent — no WebFetch calls)*:
 
