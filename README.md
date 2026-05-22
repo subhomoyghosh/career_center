@@ -43,7 +43,11 @@ Run `uv run streamlit run app.py` to see your jobs board, feedback history, and 
 
 ### Concurrency
 
-The jobs DB and config JSON are cached via `@st.cache_data` with an `(mtime, size)` fingerprint. Each row's write is wrapped in an explicit `BEGIN IMMEDIATE` transaction so `/fetchjobs` and UI edits don't clobber each other. Connection opens with `timeout=30.0` to wait out lock contention rather than fail.
+Safe simultaneous access when `/fetchjobs` and Streamlit edits land at the same time:
+
+- Jobs DB + config JSON cached via `@st.cache_data` with `(mtime, size)` fingerprint
+- Each row write wrapped in `BEGIN IMMEDIATE` transaction (no lost updates)
+- Connection timeout set to `30.0` — waits out brief locks instead of failing
 
 ---
 
@@ -92,12 +96,21 @@ A pro-user contract: you run heavy, the system compresses cost without losing si
 
 ### Four modes
 
-| Mode | Trigger | What happens |
+| Mode | Trigger | Summary |
 | --- | --- | --- |
-| `--auto` | Auto-dispatched at end of `/fetchjobs` when `auto_improve_enabled: true` (default for pro users) | (1) Self-heal: auto-revert any prior applied change whose next-run metrics regressed (`valid_jobs < 0.85×`, `pct_high_score < 0.85×`, or `tokens_per_valid_job > 1.5×` vs. the change's `pre_metrics`). (2) Walk Tier 1–4 compaction; auto-apply each with `pre_metrics` recorded so the NEXT run can audit it. (3) Stage PATTERN_*/SCORING_DRIFT_ proposals to Streamlit (human-gated). (4) Print brief `AUTO_SUMMARY`. |
-| `--audit-only` | Set `auto_improve_audit_enabled: true` instead | Stages every proposal — including cost-only ones — to `data/improve_proposals.jsonl`. Review and approve in Streamlit → Analytics. |
-| `--apply <change_id>` | Streamlit "Apply approved" button | Direct apply via `apply_proposal(change_id)`. Git-tracked files get an `[improve]` commit; gitignored (e.g., `candidate_info.json`) uses a structured inverse-op. |
-| Manual `/improve` | Type `/improve` in chat | One-at-a-time interactive walkthrough with full evidence display. |
+| `--auto` | Auto-dispatched at end of `/fetchjobs` when `auto_improve_enabled: true` (default for pro users) | Self-heal regressions, auto-apply Tier 1–4 compaction, stage human-gated proposals |
+| `--audit-only` | Set `auto_improve_audit_enabled: true` instead | Stage all proposals to Streamlit for review (no auto-apply) |
+| `--apply <change_id>` | Streamlit "Apply approved" button | Apply a single staged proposal; commit if tracked, inverse-op if not |
+| Manual `/improve` | Type `/improve` in chat | Interactive walkthrough with full evidence for each proposal |
+
+#### `--auto` workflow (default for pro users)
+
+Runs three steps automatically:
+
+1. **Self-heal** — Revert any prior applied change whose metrics regressed: `valid_jobs < 0.85×`, `pct_high_score < 0.85×`, or `tokens_per_valid_job > 1.5×` (vs. baseline `pre_metrics`)
+2. **Compaction** — Walk Tier 1–4; auto-apply each with `pre_metrics` recorded so the NEXT run can audit them
+3. **Human gate** — Stage PATTERN_*/SCORING_DRIFT_ proposals to Streamlit (those change behavior, not just cost)
+4. **Summary** — Print `AUTO_SUMMARY` (reverted N, applied N, bytes reclaimed, trend)
 
 ### Compaction tiers
 
@@ -134,9 +147,24 @@ This data powers the proposal generation and regression watchlist.
 
 The system has three layers:
 
-1. **Agent orchestrator** (`/fetchjobs`) — Variant dispatcher → Context Team (profile + nudge + resume) → Discovery Team (WebSearch + WebFetch waves) → Scoring (in-context or subagent) → Persistence Agent (link validation + DB write) + Wisdom synthesis.
-2. **Persistence layer** — SQLite DB (`sovereign_agent.db`) + snapshot history (`data/history/`) for safe rollback.
-3. **Self-tuning layer** — Efficiency audit + pain-point detection + compaction walk + regression watchlist. Triggered at end of `/fetchjobs` or on-demand.
+#### 1. Agent orchestrator (`/fetchjobs`)
+
+- Variant dispatcher → Context Team (profile + nudge + resume)
+- Discovery Team (WebSearch + WebFetch waves)
+- Scoring (in-context or subagent)
+- Persistence Agent (link validation + DB write)
+- Wisdom synthesis
+
+#### 2. Persistence layer
+
+- SQLite DB (`sovereign_agent.db`)
+- Snapshot history (`data/history/`) for safe rollback
+
+#### 3. Self-tuning layer
+
+- Efficiency audit + pain-point detection + compaction walk
+- Regression watchlist
+- Triggered at end of `/fetchjobs` or on-demand
 
 ### Key files
 
@@ -157,21 +185,53 @@ The system has three layers:
 
 ### Candidate profile schema
 
-Minimal required keys: `core_identity`, `scientific_moat`, `engineering_stack`, `target_seniority`, `target_country`, `priority_domains`, `golden_keywords`, `noise_keywords`, `excluded_companies`, `excluded_areas`, `excluded_pairs`.
+**Minimal required keys** (identity + search):
 
-Self-tuning keys (written by `/improve`'s feedback synthesizer): `inclinations`, `disinclinations`, `learn_skills`.
+- `core_identity` — what you do
+- `scientific_moat` — your research/domain strengths (comma-sep)
+- `engineering_stack` — tech areas you know
+- `target_seniority` — role level (e.g., Staff, Principal, Lead)
+- `target_country` — geographic preference
+- `priority_domains` — industries you target
+- `golden_keywords` — search terms that work
+- `noise_keywords` — filter out these terms
+- `excluded_companies` — exact company names to skip
+- `excluded_areas` — substring match on job theme
+- `excluded_pairs` — `company:area` AND-filters
 
-Behavior toggles: `auto_improve_enabled` (when true, every `/fetchjobs` auto-runs `/improve --auto`). `auto_improve_audit_enabled` (legacy; stages everything for review instead).
+**Self-tuning keys** (auto-written by `/improve`):
 
-Tier keys: `plan_tier` (`"pro"` / `"max5x"` / `"max20x"` — asked once in `/setup` and saved), and optional `runtime_mode_override` (`"lean"` / `"full"` — when set, dispatcher silently uses it every run).
+- `inclinations` — patterns you like (discovered from Good/Applied/Won)
+- `disinclinations` — patterns you avoid (from NotForMe/Closed)
+- `learn_skills` — areas to upskill in
 
-Missing keys are normalized in via `_normalize_config_shape`.
+**Behavior toggles**:
+
+- `auto_improve_enabled` — auto-run `/improve --auto` at end of `/fetchjobs` (default: true for pro users)
+- `auto_improve_audit_enabled` — legacy; stages all proposals for manual review instead
+
+**Tier + mode keys**:
+
+- `plan_tier` — `"pro"` / `"max5x"` / `"max20x"` (asked once in `/setup`, saved)
+- `runtime_mode_override` — `"lean"` / `"full"` (optional; skips the dispatch prompt)
+
+**Note:** Missing keys auto-normalize via `_normalize_config_shape`.
 
 ### Feedback synthesis
 
-After each `/fetchjobs`, the system logs which jobs you marked `Good`/`Bad` and which statuses you set. The next `/improve` cycle synthesizes these patterns across company, skill, domain, and problem-type axes, proposing hypotheses (e.g., "you keep closing civil-eng roles at startups — inclination to avoid that pattern?" or "you applied to 3 remote DS roles but none of them went past screening — consider a competing signal?").
+The system learns from your feedback loop:
 
-Proposals stage to `data/improve_proposals.jsonl` and appear in Streamlit → Analytics → Pending Improvements. Five adversarial gates validate them before forwarding; only PASS verdicts become actionable.
+**How it works:**
+
+- Each `/fetchjobs` logs jobs you marked `Good`/`Bad` and status changes
+- Next `/improve` cycle analyzes patterns across company, skill, domain, problem-type
+- Auto-proposes hypotheses (e.g., "you close civil-eng roles at startups — avoid?" or "applied 3 remote DS but no offers — competing signal?")
+
+**Validation:**
+
+- Proposals stage to `data/improve_proposals.jsonl`
+- Five adversarial gates validate before forwarding
+- Only PASS verdicts → actionable (stage to Streamlit → Analytics → Pending Improvements)
 
 ---
 
