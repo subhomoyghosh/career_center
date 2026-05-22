@@ -27,27 +27,27 @@ Run `uv run streamlit run app.py` to see your jobs board, feedback history, and 
 
 ### Pages
 
-| Page | Purpose |
+| Page | What you see |
 | --- | --- |
-| **Home** | Filter (domain, source) → edit status, feedback, weight per row → **Save feedback & status**. Status lifecycle: `New` / `Applied` / `InProgress` / `Closed` / `Won` / `NotForMe`. Closed/Won stay POSITIVE-GENRE for the next run's nudge system. |
-| **Analytics** | Totals, high-moat count, average score, Match Quality histogram. **Token Usage** table (per-run Input/Output/Cache/Productive/Lost). **Pending Improvements** (staged proposals awaiting approval). **Improvement History** (applied changes with revert buttons). |
-| **Historical Runs** | Last 5 `/fetchjobs` runs with token breakdown and domain distribution. |
+| **Home** | Left: your candidate info + intelligence. Right: jobs table (filterable by domain/source). Edit status, feedback, weight, then click **Save**. |
+| **Analytics** | Token usage breakdown. Pending improvements (staged proposals). Applied change history. |
+| **Historical Runs** | Last 5 searches side-by-side (job count, tokens, domain breakdown). |
 
 ### Sidebar
 
-- **Profile:** Strategic Pitch, Scientific Moat, Engineering Stack, Target Seniority/Country.
-- **Search:** Golden Keywords, Noise Keywords, Priority Domains, Search Targets/ATS sites.
-- **Exclusions:** `excluded_companies` (exact), `excluded_areas` (substring on theme), `excluded_pairs` (`company:area`, AND-match). Enforced at fetch-time and as a backstop in persistence; debug counters surface misconfiguration.
-- **Toggles:** Market Intelligence (show wisdom column), Weight column visibility.
-- **Update Profile:** Saves sidebar changes to `candidate_info.json` and snapshots the prior state.
+- **Profile:** Your pitch, moat, stack, level, location
+- **Search:** Keywords to find, keywords to avoid, target domains
+- **Exclusions:** Companies to skip, themes to skip, company+theme pairs to skip
+- **Toggles:** Show/hide wisdom and weight columns
+- **Update Profile:** Saves all changes and snapshots the previous version
 
-### Concurrency
+### Safe simultaneous edits
 
-Safe simultaneous access when `/fetchjobs` and Streamlit edits land at the same time:
+When `/fetchjobs` runs while you're editing in Streamlit, data stays consistent:
 
-- Jobs DB + config JSON cached via `@st.cache_data` with `(mtime, size)` fingerprint
-- Each row write wrapped in `BEGIN IMMEDIATE` transaction (no lost updates)
-- Connection timeout set to `30.0` — waits out brief locks instead of failing
+- DB changes detected by file modification time + size
+- Each edit is wrapped in a database lock (no overwrites)
+- Brief locks wait instead of fail (timeout: 30 seconds)
 
 ---
 
