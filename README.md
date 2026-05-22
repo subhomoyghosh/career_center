@@ -25,7 +25,7 @@ Self-sufficient job-search orchestrator. Autonomous agent discovers, scores, and
 
 Run `uv run streamlit run app.py` to see your jobs board, feedback history, and pending improvements.
 
-### Pages
+Three pages + sidebar on every page:
 
 | Page | What you see |
 | --- | --- |
@@ -33,21 +33,13 @@ Run `uv run streamlit run app.py` to see your jobs board, feedback history, and 
 | **Analytics** | Token usage breakdown. Pending improvements (staged proposals). Applied change history. |
 | **Historical Runs** | Last 5 searches side-by-side (job count, tokens, domain breakdown). |
 
-### Sidebar
+**Sidebar (on all pages):**
 
 - **Profile:** Your pitch, moat, stack, level, location
 - **Search:** Keywords to find, keywords to avoid, target domains
 - **Exclusions:** Companies to skip, themes to skip, company+theme pairs to skip
 - **Toggles:** Show/hide wisdom and weight columns
 - **Update Profile:** Saves all changes and snapshots the previous version
-
-### Safe simultaneous edits
-
-When `/fetchjobs` runs while you're editing in Streamlit, data stays consistent:
-
-- DB changes detected by file modification time + size
-- Each edit is wrapped in a database lock (no overwrites)
-- Brief locks wait instead of fail (timeout: 30 seconds)
 
 ---
 
