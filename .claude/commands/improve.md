@@ -73,9 +73,9 @@ Parse output JSON:
   This is sufficient for pain-point detection, compaction-tier analysis, and cross-tool similarity checks.
 - **`cache_misses`** `[rel_path]` — not cached or file changed. Read full content as specified in §1 below.
 
-**Escape hatch:** if a specific pain point requires verbatim text of a cached file (e.g. `SKILL_TOKEN_BLOAT` CURRENT: block), read it anyway and log `cache_override: <path>`. The §1.75 update step will refresh its cache entry.
+**Escape hatch:** if a specific pain point requires verbatim text of a cached file (e.g. `SKILL_TOKEN_BLOAT` CURRENT: block), read it and log `cache_override: <path>`. The §1.75 update step will refresh its cache entry.
 
-**Guard:** if `scripts/skill_cache.py` does not exist, skip this section silently — treat all files as cache misses.
+**Guard:** if `scripts/skill_cache.py` does not exist, skip this section — treat all files as cache misses.
 
 ---
 

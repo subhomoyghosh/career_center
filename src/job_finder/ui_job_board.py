@@ -323,15 +323,16 @@ def _render_token_table_or_fallback() -> None:
     st.dataframe(df, use_container_width=True)
     if empty:
         st.caption(
-            "No token data yet. Populated by /fetchjobs (writes per-run rows to "
-            "`data/run_diagnostics.jsonl`) and `/improve` (writes a single-shot "
-            "audit to `/tmp/improve_audit.json`). Newest session would appear leftmost."
+            "📊 **Display-only.** No token data yet. Run `/fetchjobs` or `/improve` to populate. "
+            "**Rows:** token categories (Input, Output, Cache, Productive, Lost). "
+            "**Columns:** most-recent sessions (newest leftmost)."
         )
     else:
         st.caption(
-            "Rows: token categories. Columns: most-recent sessions (newest leftmost; "
-            "up to 5). `last audit` is the one-shot audit JSON; numbered timestamps are "
-            "/fetchjobs runs."
+            "📊 **Display-only.** "
+            "**Rows:** token categories. "
+            "**Columns:** most-recent sessions (newest leftmost). "
+            "`last audit` = `/improve` one-shot audit; timestamps = `/fetchjobs` runs."
         )
 
 
@@ -385,36 +386,34 @@ def _render_pending_improvements() -> None:
     if not pending:
         st.info(
             "No pending proposals yet. Run /fetchjobs with the auto-audit toggle "
-            "on (sidebar), or `/improve --audit-only` manually. The table below "
-            "shows the columns you'll see once proposals are staged."
+            "on (sidebar), or `/improve --audit-only` manually."
         )
-        rows: list[dict] = []
-    else:
-        st.info(
-            f"{len(pending)} proposal(s) pending review. Tick **Approve?** to apply, "
-            "**Dismiss?** to reject without applying, then click the matching button below."
-        )
-        rows = []
-        for p in pending:
-            rows.append({
-                "approve": False,
-                "dismiss": False,
-                "severity": p.get("severity", ""),
-                "pain_point": p.get("pain_point", ""),
-                "file": p.get("file_changed", ""),
-                "summary": p.get("summary", ""),
-                "change": _patch_preview(p.get("patch") or {}),
-                "evidence": _evidence_str(p.get("evidence") or {}),
-                "staged_at": str(p.get("created_at", ""))[:19],
-                "change_id": p.get("change_id", ""),
-            })
+        return
+
+    st.caption("✏️ **INTERACTIVE:** Approve? / Dismiss? checkboxes only — then click a button below")
+    st.caption("📖 **Display-only:** Severity, Pain Point, File, Summary, Patch, Evidence, Staged at, id")
+
+    rows = []
+    for p in pending:
+        rows.append({
+            "approve": False,
+            "dismiss": False,
+            "severity": p.get("severity", ""),
+            "pain_point": p.get("pain_point", ""),
+            "file": p.get("file_changed", ""),
+            "summary": p.get("summary", ""),
+            "change": _patch_preview(p.get("patch") or {}),
+            "evidence": _evidence_str(p.get("evidence") or {}),
+            "staged_at": str(p.get("created_at", ""))[:19],
+            "change_id": p.get("change_id", ""),
+        })
     df = pd.DataFrame(rows, columns=_PENDING_COLUMNS)
 
     edited = st.data_editor(
         df,
         column_config={
-            "approve": st.column_config.CheckboxColumn("Approve?", default=False),
-            "dismiss": st.column_config.CheckboxColumn("Dismiss?", default=False),
+            "approve": st.column_config.CheckboxColumn("✓ Approve?", default=False),
+            "dismiss": st.column_config.CheckboxColumn("✗ Dismiss?", default=False),
             "severity": st.column_config.TextColumn("Sev", width="small"),
             "pain_point": st.column_config.TextColumn("Pain Point"),
             "file": st.column_config.TextColumn("File"),
@@ -435,13 +434,9 @@ def _render_pending_improvements() -> None:
 
     c1, c2 = st.columns(2)
     with c1:
-        apply_clicked = st.button("Apply approved", type="primary", key="apply_approved_btn")
+        apply_clicked = st.button("Apply ✓ approved", type="primary", key="apply_approved_btn")
     with c2:
-        dismiss_clicked = st.button("Dismiss selected", key="dismiss_selected_btn")
-
-    if (apply_clicked or dismiss_clicked) and not pending:
-        st.warning("No proposals to act on.")
-        return
+        dismiss_clicked = st.button("Dismiss ✗ selected", key="dismiss_selected_btn")
 
     if apply_clicked or dismiss_clicked:
         applied_n = dismissed_n = errors = 0
@@ -490,12 +485,7 @@ _HISTORY_COLUMNS = [
 
 def _render_improvement_history() -> None:
     st.subheader("Improvement History")
-    st.caption(
-        "Recently applied /improve changes. Tick **Revert?** and click **Apply reverts** "
-        "to undo. Tracked files (`.md`, `.py`) revert via `git revert`; gitignored files "
-        "(e.g. `candidate_info.json`) revert via structured inverse-op. "
-        "Partial reverts preserve other applied changes."
-    )
+    st.caption("Recently applied /improve changes. Tick **Revert?** to undo. Tracked files (`.md`, `.py`) revert via `git revert`; gitignored files revert via inverse-op.")
 
     rows_to_show = st.number_input(
         "Rows to show",
@@ -513,35 +503,11 @@ def _render_improvement_history() -> None:
         return
 
     if not changes:
-        st.info(
-            "No /improve changes applied yet. The table below shows the columns "
-            "you'll see once you approve a proposal above. The Revert button at "
-            "the bottom becomes active once there's at least one applied change."
-        )
-        rows: list[dict] = []
-        df = pd.DataFrame(rows, columns=_HISTORY_COLUMNS)
-        # Still attempt to surface any legacy log entries below the empty preview.
-        edited = st.data_editor(
-            df,
-            column_config={
-                "revert": st.column_config.CheckboxColumn("Revert?", default=False),
-                "severity": st.column_config.TextColumn("Sev", width="small"),
-                "pain_point": st.column_config.TextColumn("Pain Point"),
-                "file": st.column_config.TextColumn("File"),
-                "summary": st.column_config.TextColumn("Summary", width="large"),
-                "status": st.column_config.TextColumn("Status", width="small"),
-                "mode": st.column_config.TextColumn("Mode", width="small"),
-                "commit": st.column_config.TextColumn("Commit", width="small"),
-                "applied_at": st.column_config.TextColumn("Applied at", width="small"),
-                "change_id": st.column_config.TextColumn("id", width="small", disabled=True),
-            },
-            disabled=[c for c in _HISTORY_COLUMNS if c != "revert"],
-            hide_index=True,
-            use_container_width=True,
-            key="improvement_history_editor_empty",
-        )
-        _render_legacy_improvement_log()
+        st.info("No /improve changes applied yet.")
         return
+
+    st.caption("✏️ **INTERACTIVE:** Revert? checkbox only — then click button below")
+    st.caption("📖 **Display-only:** Severity, Pain Point, File, Summary, Status, Mode, Commit, Applied at, id")
 
     rows = []
     for c in changes:
@@ -564,7 +530,7 @@ def _render_improvement_history() -> None:
     edited = st.data_editor(
         df,
         column_config={
-            "revert": st.column_config.CheckboxColumn("Revert?", default=False),
+            "revert": st.column_config.CheckboxColumn("✗ Revert?", default=False),
             "severity": st.column_config.TextColumn("Sev", width="small"),
             "pain_point": st.column_config.TextColumn("Pain Point"),
             "file": st.column_config.TextColumn("File"),
@@ -584,7 +550,7 @@ def _render_improvement_history() -> None:
         key="improvement_history_editor",
     )
 
-    if st.button("Apply reverts", key="apply_reverts_btn"):
+    if st.button("Apply ✗ reverts", key="apply_reverts_btn"):
         reverted_n = errors = 0
         for _, row in edited.iterrows():
             if not row.get("revert"):

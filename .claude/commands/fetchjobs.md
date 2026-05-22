@@ -96,7 +96,9 @@ Then continue with the normal sequence below.
 
    **Wave 1 — Search Wave:** Fire all primary `WebSearch` queries simultaneously in a single message (target 8–10 calls). Build queries per the rules below, then dispatch all at once.
 
-   **Wave 2 — Fetch Wave:** After Wave 1 returns, fire all `WebFetch` calls for promising candidates simultaneously in a single message (target 6–8 calls). Includes aggregator fallback fetches for JS-rendered ATS pages.
+   **Pre-Wave-2 URL Filter (board-page early-exit):** Before fetching candidates, filter out URLs matching board-page patterns: path ends in `/jobs`, `/openings`, `/careers`, `/positions` with no job-ID segment; or query-only params like `?q=`, `?keyword=`, `?department=`, `?location=`, `?error=true`; or URL contains aggregator index pages (e.g. `/search`, `/browse`, `/listings` without a job ID). Log filtered count as `board_page_urls_skipped_pre_fetch`. This prevents wasted fetches and improves Wave 2 efficiency.
+
+   **Wave 2 — Fetch Wave:** After Wave 1 returns, fire all `WebFetch` calls for surviving candidates simultaneously in a single message (target 6–8 calls). Includes aggregator fallback fetches for JS-rendered ATS pages.
 
    **Wave 3 — Backfill Wave:** After Wave 2 returns, fire any remaining secondary `WebSearch` queries (ATS backfill for LinkedIn, aggregator searches for 403 Lever/Ashby pages) + any follow-up `WebFetch` calls simultaneously in a single message. **Include domain blind spot recovery:** tally which `priority_domains` have 0 discovered candidates after Wave 2. For each zero-coverage domain, add one broad targeted query to this wave: `"Data Scientist" OR "Applied Scientist" "[domain keyword]" site:lever.co OR site:job-boards.greenhouse.io` (e.g. "autonomous systems", "renewable energy", "climate"). Log `blind_spot_recovery_queries: [<domain>, ...]`.
 
