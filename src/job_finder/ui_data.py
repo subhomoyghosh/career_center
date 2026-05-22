@@ -67,6 +67,11 @@ def _load_data_cached(sig: Tuple[str, str, Tuple[float, int], float]) -> Tuple[D
         conn.close()
 
     if not jobs.empty:
+        from job_finder.exclusions import apply_exclusions
+        records, _ = apply_exclusions(jobs.to_dict("records"), config)
+        jobs = pd.DataFrame(records, columns=jobs.columns) if records else pd.DataFrame(columns=jobs.columns)
+
+    if not jobs.empty:
         if "link" in jobs.columns:
             jobs["source"] = jobs["link"].map(source_from_link)
         if "user_feedback" not in jobs.columns:
