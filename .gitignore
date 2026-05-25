@@ -27,9 +27,11 @@ data/last_session.json
 data/_descriptions/
 data/_fetchjobs_candidates.json
 data/_fetchjobs_scored.json
+data/_fetchjobs_alive.json
 data/fpr_recheck_latest.json
 
 # Runtime caches (recomputed on demand)
 data/skill_analysis_cache.json
 data/cold_sections_cache.json
+data/improve_history.jsonl
 src/job_finder.egg-info/
