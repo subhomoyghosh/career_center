@@ -77,10 +77,22 @@ Resumes are often generic: "Data Scientist with 5+ years building ML models," "E
   **["Junior", "Intern", "Web Developer", "Front End", "Marketing Analyst", "Business Intelligence", "Entry Level", "Contract"]**
   to filter out mismatched postings.
 
-### 10. wisdom
+### 10. allowed_metros + allowed_work_modes + remote_anywhere_ok (location/work-mode hard filter)
+
+- **What:** Three orthogonal fields enforced as a hard filter in `_scoring_rules.md §1e`. Empty list / missing field on any axis ⇒ NO constraint on that axis.
+- **Cannot be inferred from resume** — ask the user via `AskUserQuestion` after presenting the inferred JSON. Three questions:
+  1. *"Which metro regions are you open to for hybrid/onsite roles? (Leave blank for any.)"* — answer is a list of **fuzzy region names** like `"San Francisco Bay Area, CA"`, `"Greater Boston"`, `"NYC metro"`. The Scoring Subagent uses geographic knowledge to judge city-to-region membership — do NOT enumerate cities. Default to **[]** if user says "any" or skips.
+  2. *"Which work modes are you open to?"* — multi-select from `remote`, `hybrid`, `onsite`. Default to **["remote", "hybrid", "onsite"]** if user skips.
+  3. *"Are remote roles outside your allowed_metros OK?"* — yes/no. Default **true** if user skips. (If `remote_anywhere_ok: true`, remote postings bypass the metro check.)
+- **Format:**
+  - `allowed_metros: ["San Francisco Bay Area, CA"]` — one fuzzy region per entry; LLM-judged membership at scoring time
+  - `allowed_work_modes: ["remote", "hybrid", "onsite"]` (subset)
+  - `remote_anywhere_ok: true`
+
+### 11. wisdom
 - Leave as **`""`**. It is filled later by /fetchjobs.
 
-### 11. plan_tier (Claude Code subscription)
+### 12. plan_tier (Claude Code subscription)
 - **What:** Which Claude Code plan the user is on. Controls which `/fetchjobs` variant runs (Max-tier uses Opus + verbose chat; Pro-tier uses Sonnet + description-externalized scoring to fit a Pro 5-hour rate window).
 - **How to fill:** Cannot be inferred from the resume — ask the user via `AskUserQuestion` at the END of the /setup flow (after presenting the inferred JSON). Options: `Pro ($20/mo)` → save as `"pro"`; `Max 5x ($100/mo)` → save as `"max5x"`; `Max 20x ($200/mo)` → save as `"max20x"`.
 - **Default if user skips:** leave as `""`. The `/fetchjobs` dispatcher will ask again on first invocation.
@@ -100,6 +112,9 @@ Resumes are often generic: "Data Scientist with 5+ years building ML models," "E
   "golden_keywords": "",
   "search_targets": ["lever.co", "greenhouse.io", "ashbyhq.com", "workday.com", "jobs.lever.co", "boards.greenhouse.io", "linkedin.com/jobs"],
   "noise_keywords": ["Junior", "Intern", "Web Developer", "Front End", "Marketing Analyst", "Business Intelligence", "Entry Level", "Contract"],
+  "allowed_metros": [],
+  "allowed_work_modes": ["remote", "hybrid", "onsite"],
+  "remote_anywhere_ok": true,
   "wisdom": "",
   "plan_tier": ""
 }

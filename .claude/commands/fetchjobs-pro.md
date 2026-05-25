@@ -75,7 +75,7 @@ Also apply **nudge amplification**: for each job in `high_signal_jobs` with `use
 
 ### Wave 1 — Search (single parallel message, 8–10 WebSearch calls)
 
-Build queries per `fetchjobs.md` Step 2's query-building rules (site-targets, golden_keywords ∩ scientific_moat ∩ engineering_stack ∩ priority_domains, recency tokens, target_country, peer_companies organic search). Fire all in one message.
+Build queries per `fetchjobs.md` Step 2's query-building rules (site-targets, golden_keywords ∩ scientific_moat ∩ engineering_stack ∩ priority_domains, recency tokens, target_country, **location/work-mode hints on broad queries when `allowed_metros` / `allowed_work_modes` are non-empty**, peer_companies organic search). Fire all in one message.
 
 ### Wave 2 — Fetch + externalize (single parallel message, 6–8 WebFetch calls)
 
@@ -139,7 +139,7 @@ You are the Scoring Subagent for /fetchjobs-pro. You ONLY use Read/Write/Bash �
 INPUT FILES:
 - data/_fetchjobs_candidates.json — array of {idx, company, title, link, snippet, description_path, posted_at, source_wave}
 - data/_descriptions/*.txt — one file per candidate, full job description text
-- data/candidate_info.json — profile (read these keys ONLY: scientific_moat, engineering_stack, core_identity, priority_domains, noise_keywords, excluded_companies, excluded_areas, excluded_pairs, inclinations, disinclinations, learn_skills). Do NOT read peer_companies — that's a discovery-only field, not used in scoring.
+- data/candidate_info.json — profile (read these keys ONLY: scientific_moat, engineering_stack, core_identity, priority_domains, noise_keywords, excluded_companies, excluded_areas, excluded_pairs, inclinations, disinclinations, learn_skills, allowed_metros, allowed_work_modes, remote_anywhere_ok). Do NOT read peer_companies — that's a discovery-only field, not used in scoring.
 
 YOUR JOB: apply the moat-seeker scoring logic from `.claude/_scoring_rules.md` (read that file — it is compact ~5KB, NOT the 44KB fetchjobs.md). Write the scored output to data/_fetchjobs_scored.json with these keys per row: {company, title, link, score, theme, rationale, description_path, posted_at?}.
 
@@ -151,6 +151,7 @@ SCORING RULES (summary — canonical rules are in `.claude/_scoring_rules.md` wh
    - excluded_companies (case-insensitive exact match on company)
    - excluded_areas (any entry is case-insensitive substring of theme)
    - excluded_pairs (company:area both match; split on FIRST colon)
+   - **Location + work-mode (§1e)**: parse `mode` (remote/hybrid/onsite/unknown) and `location` from the JD's location/work-mode header — NOT from arbitrary mentions of those words elsewhere in the description. Then: (a) if `allowed_work_modes` non-empty AND mode ∉ allowed_work_modes → drop; (b) else if `allowed_metros` non-empty: remote+`remote_anywhere_ok=true` bypasses metro check; otherwise use geographic knowledge to judge if location belongs to any allowed_metros region (e.g. "Mountain View, CA" ∈ "San Francisco Bay Area, CA"); no match → drop. Unknown mode/location → keep (note uncertainty in rationale).
 2. SCORE BANDS:
    - 90–100: description explicitly requires ≥3 items from scientific_moat. Bonus if in a priority_domain.
    - 70–89: matches core_identity AND ≥2 items from engineering_stack.

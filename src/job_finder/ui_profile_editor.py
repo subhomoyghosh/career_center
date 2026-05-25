@@ -27,6 +27,11 @@ def render_profile_sidebar(profile: dict, config: dict) -> tuple[bool, bool]:
         excluded_companies_list = profile.get("excluded_companies") or []
         excluded_areas_list = profile.get("excluded_areas") or []
         excluded_pairs_list = profile.get("excluded_pairs") or []
+        allowed_metros_list = profile.get("allowed_metros") or []
+        allowed_metros_list = allowed_metros_list if isinstance(allowed_metros_list, list) else [allowed_metros_list]
+        allowed_work_modes_list = profile.get("allowed_work_modes") or []
+        allowed_work_modes_list = allowed_work_modes_list if isinstance(allowed_work_modes_list, list) else [allowed_work_modes_list]
+        remote_anywhere_ok = bool(profile.get("remote_anywhere_ok", True))
 
         countries = ["USA", "UK", "Canada", "Remote", "Europe"]
         curr_country = profile.get("target_country") or "USA"
@@ -114,6 +119,40 @@ def render_profile_sidebar(profile: dict, config: dict) -> tuple[bool, bool]:
                     key="excluded_pairs_input",
                 )
 
+            with st.expander("Location & Work Mode", expanded=False):
+                new_allowed_metros = st.text_input(
+                    "Allowed metros (comma-sep, fuzzy regions)",
+                    value=", ".join(allowed_metros_list),
+                    help=(
+                        "Fuzzy region names — LLM uses geographic knowledge to judge city membership. "
+                        "Examples: 'San Francisco Bay Area, CA', 'Greater Boston', 'NYC metro'. "
+                        "Mountain View / Oakland / Palo Alto are recognized as SF Bay Area. "
+                        "Empty = no metro constraint (any location OK)."
+                    ),
+                    key="allowed_metros_input",
+                )
+                new_allowed_work_modes = st.multiselect(
+                    "Allowed work modes",
+                    options=["remote", "hybrid", "onsite"],
+                    default=[m for m in allowed_work_modes_list if m in {"remote", "hybrid", "onsite"}],
+                    help=(
+                        "Hard filter on the JD's stated work mode. "
+                        "Empty (no chips selected) = no mode constraint (all modes pass through). "
+                        "Picking all three has the same effect as leaving it empty."
+                    ),
+                    key="allowed_work_modes_input",
+                )
+                new_remote_anywhere_ok = st.toggle(
+                    "Remote roles bypass the metro check",
+                    value=remote_anywhere_ok,
+                    help=(
+                        "If ON: fully-remote postings are kept regardless of location. "
+                        "If OFF: even remote roles must be in an allowed_metros region "
+                        "(rare — usually used when 'remote' actually means 'remote within a specific metro')."
+                    ),
+                    key="remote_anywhere_ok_toggle",
+                )
+
             st.divider()
             new_auto_audit = st.toggle(
                 "Auto-improve audit after each /fetchjobs",
@@ -151,6 +190,9 @@ def render_profile_sidebar(profile: dict, config: dict) -> tuple[bool, bool]:
                 "excluded_companies": to_list(new_excl_companies),
                 "excluded_areas": to_list(new_excl_areas),
                 "excluded_pairs": to_list(new_excl_pairs),
+                "allowed_metros": to_list(new_allowed_metros),
+                "allowed_work_modes": list(new_allowed_work_modes),
+                "remote_anywhere_ok": bool(new_remote_anywhere_ok),
                 "auto_improve_audit_enabled": bool(new_auto_audit),
             }
             try:
