@@ -503,14 +503,17 @@ def compute_pruner_fpr_alert(
         str(r.get("link", "")) for r in resurrected
         if isinstance(r, dict) and r.get("link")
     ]
-    if sample_size < _FPR_MIN_SAMPLE:
+    fpr = len(resurrected_ids) / sample_size if sample_size > 0 else 0.0
+    if sample_size < _FPR_MIN_SAMPLE and fpr <= max(_FPR_ALERT_THRESHOLD * 5, 0.25):
+        # Small sample AND modest FPR: suppress (noise floor).
+        # Small sample BUT extreme FPR (e.g. 5/8 = 62.5%): still alert — divergence with the
+        # Persistence Agent runtime HEAD-check is worse than a noisy true-positive.
         return {
             "pruner_fpr_alert": False,
-            "fpr": 0.0,
+            "fpr": fpr,
             "sample_size": sample_size,
             "resurrected_ids": resurrected_ids,
         }
-    fpr = len(resurrected_ids) / sample_size if sample_size > 0 else 0.0
     return {
         "pruner_fpr_alert": fpr > _FPR_ALERT_THRESHOLD,
         "fpr": fpr,
