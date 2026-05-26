@@ -36,11 +36,12 @@ substring of `theme`.
 split on the FIRST colon; left side = company (exact, case-insensitive), right side =
 substring of theme. Empty-after-strip entries are silently ignored.
 
-**1e. Location + work-mode constraints** — three orthogonal fields from `candidate_info.json`:
+**1e. Location + work-mode constraints** — four orthogonal fields from `candidate_info.json`:
 
 - `allowed_metros: [str, ...]` — empty list ⇒ no metro constraint. Each entry is a **fuzzy region name** (e.g. `"San Francisco Bay Area, CA"`, `"Greater Boston"`, `"NYC metro"`). Use your geographic knowledge to judge membership, **not** substring match. E.g. `"Mountain View, CA"`, `"Oakland, CA"`, `"Palo Alto"` all belong to `"San Francisco Bay Area, CA"`. `"Cambridge, MA"`, `"Somerville, MA"` belong to `"Greater Boston"`.
 - `allowed_work_modes: [str, ...]` — subset of `{remote, hybrid, onsite}`; empty ⇒ any mode OK
-- `remote_anywhere_ok: bool` — if true, remote roles bypass the metro check
+- `remote_anywhere_ok: bool` — if true, remote roles bypass the **metro** check (NOT the country check — see below)
+- `target_country: str` — candidate's authorized work country (e.g. `"USA"`). Empty/unset ⇒ no country constraint.
 
 **Parsing rules (anti-false-positive):**
 
@@ -50,13 +51,14 @@ substring of theme. Empty-after-strip entries are silently ignored.
 - "Hybrid (3 days in office)" → `hybrid`; the cadence detail is informational only.
 - "On-site at HQ", "5-day onsite" → `onsite`.
 
-Drop logic:
+Drop logic (apply in order):
 
 1. If `allowed_work_modes` is non-empty AND `mode in {remote, hybrid, onsite}` AND `mode NOT IN allowed_work_modes` → drop, log `excluded_work_mode: <mode>`.
-2. Else if `allowed_metros` is non-empty:
-   - If `mode == remote` AND `remote_anywhere_ok` → keep (remote bypasses metro check).
+2. **Country gate (applies to ALL modes, including remote):** if `target_country` is set AND `location` names a country/region outside `target_country` → drop, log `excluded_country: <location>`. `remote_anywhere_ok` does NOT bypass this — a role posted as "Germany (remote)" or "EMEA (remote)" requires local work authorization and is structurally unreachable for a `target_country: USA` candidate. Use geographic judgement: "Germany (remote)", "EMEA (remote)", "EU/UK", "London (remote)" all fail this gate for `target_country: USA`. Phrases like "US Remote", "Remote (US)", "Remote — United States", or a US city name with `mode=remote` pass.
+3. Else if `allowed_metros` is non-empty:
+   - If `mode == remote` AND `remote_anywhere_ok` → keep (remote bypasses **metro** check; country gate already passed in step 2).
    - Else: use geographic judgement to decide if `location` belongs to any `allowed_metros` region. If NO region contains the location → drop, log `excluded_location: <location>`.
-3. `unknown` mode or `unknown` location → KEEP (do not drop on missing data; rationale should note the uncertainty).
+4. `unknown` mode or `unknown` location → KEEP (do not drop on missing data; rationale should note the uncertainty).
 
 **Precedence:** `excluded_*` and location/work-mode filters ALWAYS win over `peer_companies`. Do not include excluded companies in peer-company organic search queries.
 
