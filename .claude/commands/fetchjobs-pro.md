@@ -83,6 +83,7 @@ For each promising candidate from Wave 1:
 
 1. Convert all `jobs.lever.co/{co}/{id}` URLs to `https://api.lever.co/v0/postings/{co}/{id}?mode=json` before fetching (Lever API rule from Max).
 1b. **Pre-canonicalize Greenhouse URLs:** rewrite any `boards.greenhouse.io/*/jobs/*` URL to `job-boards.greenhouse.io/*/jobs/*` before fetching — eliminates a 301 redirect per Greenhouse URL (10 redirect round-trips wasted this run).
+1c. **Convert Ashby URLs to the public JSON board API:** rewrite any `jobs.ashbyhq.com/{org}/{id}` URL to `https://api.ashbyhq.com/posting-api/job-board/{org}?includeCompensation=true` and match the posting by `{id}` before fetching. The `jobs.ashbyhq.com` HTML is client-side rendered, so a raw WebFetch returns title-only with no JD body — this is why every energy/climate candidate on Ashby (David Energy, Axle, Neara, GridCARE, Isometric) returned empty this run and Renewable Energy/Grid + Climate/Geospatial scored 0 alive. The JSON board endpoint returns full descriptions server-side, recovering the Ashby cohort the way step 1 already recovers Lever.
 2. Fire all WebFetch calls in parallel.
 3. **CRITICAL — externalize:** after the parallel batch returns, for each fetched result:
    - If the response is dead (404, NotFound, Gone, `?error=true` redirect, CSS-only, empty body): drop and log.
