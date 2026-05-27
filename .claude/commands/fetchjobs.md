@@ -187,7 +187,7 @@ Then continue with the normal sequence below.
    - **Snapshots:** `persist_jobs` appends a full jobs-table snapshot to `data/history/jobs_history.db` (append-only).
    - **Pruner false-positive observability (run BEFORE any pruning in this run):**
      - `sample = sample_pruned_links_for_fpr_check()` — random 10 prior-pruned links.
-     - HEAD-check each via `requests.head(link, allow_redirects=True, timeout=5)`. Count how many return 200 with non-trivial content.
+     - GET-check each via `requests.get(link, allow_redirects=True, timeout=8)`, then re-run `filter_valid_job_links([{"link": link, "title": title}], require_title_in_body=True, check_content=True)` and count a link as resurrected ONLY if it passes. A bare `requests.head` returns 200 on Ashby/Workday `/application` shells and Greenhouse `?error=true` redirects even when the posting is dead, so HEAD systematically over-counts resurrections (8/8 = 100% false-positive this run). Using the same GET+content validator the runtime uses means the FPR sampler and the live link-check cannot diverge.
      - If `>5%` come back alive: print `pruner_fpr_alert: true` with the resurrected links AND skip new pruning this run (only the alive/quarantine bookkeeping runs). Add `pruner_fpr_alert: <bool>` to diagnostics.
 
    - **Stale-link pruning — two-strike protocol (run after `persist_jobs`):**
