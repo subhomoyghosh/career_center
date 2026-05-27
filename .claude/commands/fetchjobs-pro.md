@@ -162,7 +162,7 @@ SCORING RULES (summary — canonical rules are in `.claude/_scoring_rules.md` wh
    - For each disinclinations.pattern matched: -5 (cap -15). Same scaling.
    - For each learn_skills.skill in description AND NOT in engineering_stack: +3 (cap +9). Same scaling.
    - Note matched patterns in rationale (e.g. "+10 inclinations: Series-B clean energy, probabilistic forecasting").
-4. LIFECYCLE DEDUP: query the live DB for {link: status} where status IN ('Applied','InProgress','Closed','Won','NotForMe'). If candidate.link is in that set, DROP from this run (do not persist, do not score). Log dropped_terminal_status.
+4. LIFECYCLE DEDUP: resolve the DB path via `from job_finder.paths import get_db_path` (currently `data/sovereign_agent.db`) — do NOT hardcode `data/jobs.db`, which is a stale/empty path that makes dedup silently no-op. Then query that DB for {link: status} where status IN ('Applied','InProgress','Closed','Won','NotForMe'). If candidate.link is in that set, DROP from this run (do not persist, do not score). Log dropped_terminal_status.
 5. VESTING/FUNDING: bonus 1.2× for "Series C/D", "IPO-bound", "NIST Grant", "DOE funding". Negative for generic "Agency"/"Consultancy" unless explicitly PhD/scientific.
 6. SCORING CONFIDENCE CAP: if description file is empty or only contained CSS-fallback hint AND no aggregator text was captured, cap score at 79 and note "description_not_fetched: true" in rationale.
 7. RATIONALE: must explain HOW the candidate's scientific_moat solves a specific problem mentioned in the JD. Cite specific JD phrases. Mention any soft-bias patterns matched.
